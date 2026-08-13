@@ -252,20 +252,30 @@ static int child_entry(void *arg) {
     /*
      * ---------- 핵심: 이 프로세스 자신의 real UID를 매핑값에 맞춤 ----------
      * main()이 sudo로 실행됐기 때문에, clone()으로 태어난 이 자식도 real UID를
-     * 그대로 물려받아 host UID 0(진짜 root)이다. 근데 uid_map은
-     * "namespace 0 = host map_uid(예: 1000)"으로 써뒀다 - 매핑표에 host UID 0에
-     * 대한 항목이 없으므로, 지금 이 프로세스가 자기 자신을 namespace 관점에서
-     * 봐도 nobody(overflow uid)로 나온다 (uid_map 파일 내용과 무관하게).
-     * 지금은 아직 real UID가 host root라 setuid로 임의 UID를 가질 수 있으니,
-     * 매핑에 정확히 대응하는 host UID(map_uid)로 스스로를 바꿔야
-     * namespace 안에서 제대로 UID 0(root)으로 인식되고, 이어지는 execve에서도
-     * capability가 올바르게(namespace root 기준으로) 계산된다.
-     * setgid가 setuid보다 먼저여야 한다 - uid를 먼저 낮추면 CAP_SETGID를
-     * 잃어서 그 다음 setgid가 실패할 수 있다.
+     * 그대로 물려받아 host UID 0(진짜 root)이다. uid_map은
+     * "namespace 0 = host map_uid(예: 1000)"으로 써뒀는데, 매핑표에 host UID 0에
+     * 대한 항목이 없으므로 지금 이 프로세스가 자기 자신을 namespace 관점에서
+     * 봐도 nobody(overflow uid)로 나온다.
+     *
+     * 여기서 넘기는 숫자는 "호스트 기준 UID/GID"가 아니라 "지금 이 자식이 속한
+     * user namespace 관점의 값"으로 해석된다 (이미 clone() 시점에 이 namespace
+     * 안으로 들어와 있으므로). gid_map/uid_map은 "namespace 0 = host
+     * map_uid/map_gid"로 되어 있으니, namespace 쪽에서 유효한 값은 오직 0뿐이다.
+     * setgid(args->map_gid)처럼 호스트 값(1000)을 그대로 넘기면, 그 namespace
+     * 관점에서 "GID 1000"이라는 건 매핑표에 없는 범위 밖 값이라 EINVAL이 난다
+     * (처음엔 이렇게 시도했다가 실패를 확인함).
+     *
+     * setgid(0)/setuid(0)으로 - namespace 관점의 0을 넘기면 커널이 매핑표를
+     * 참고해 이 프로세스의 real UID/GID를 host map_uid/map_gid로 실제로
+     * 바꿔준다. setgid가 setuid보다 먼저여야 한다 - uid를 먼저 낮추면
+     * CAP_SETGID를 잃어서 그 다음 setgid가 실패할 수 있다.
      */
-    if (setgid(args->map_gid) != 0) die("setgid 실패");
-    if (setuid(args->map_uid) != 0) die("setuid 실패");
-    printf("[*] setuid(%u)/setgid(%u) 완료. 재실행합니다.\n", args->map_uid, args->map_gid);
+    printf("[*] DEBUG: setgid(0)/setuid(0) 호출 (namespace 관점의 root) - "
+           "gid_map/uid_map: namespace 0 -> host uid=%u gid=%u\n",
+           args->map_uid, args->map_gid);
+    if (setgid(0) != 0) die("setgid 실패");
+    if (setuid(0) != 0) die("setuid 실패");
+    printf("[*] setuid(0)/setgid(0) 완료. 재실행합니다.\n");
 
     /*
      * ---------- re-exec: capability를 매핑된 UID 기준으로 재계산시킴 ----------
