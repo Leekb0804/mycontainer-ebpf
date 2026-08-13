@@ -387,9 +387,9 @@ int main(int argc, char *argv[]) {
     if (!stack) die("스택 할당 실패");
     char *stack_top = stack + STACK_SIZE;
 
-    printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|SIGCHLD) 호출\n");
+    printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD) 호출\n");
     pid_t child_pid = clone(child_entry, stack_top,
-                             CLONE_NEWUSER | CLONE_NEWNS | SIGCHLD,
+                             CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | SIGCHLD,
                              &cargs);
     if (child_pid == -1) die("clone 실패");
 
