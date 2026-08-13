@@ -203,8 +203,8 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     }
 
     /* ---------- 9단계: procfs 재마운트 ---------- */
-    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\", subset=pid)\n");
+    if (mount("proc", "/proc", "proc", 0, "subset=pid") != 0) {
         die("procfs 마운트 실패");
     }
 
