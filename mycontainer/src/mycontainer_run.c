@@ -146,17 +146,8 @@ static void deny_setgroups(pid_t child_pid) {
 static void run_phase2(const char *lowerdir, const char *upperdir,
                         const char *workdir, const char *mergeddir,
                         char **cmd_argv) {
-    /* ---------- [임시 디버그] execve 이후 실제 상태 확인 ---------- */
-    printf("\n===== DEBUG(phase2): uid_map =====\n");
-    system("cat /proc/self/uid_map");
-    printf("===== DEBUG(phase2): capability =====\n");
-    system("cat /proc/self/status | grep -i cap");
-    printf("===== DEBUG(phase2): namespace ID =====\n");
-    system("readlink /proc/self/ns/mnt");
-    system("readlink /proc/self/ns/user");
-    printf("===== DEBUG(phase2): getuid/geteuid =====\n");
-    printf("getuid=%d geteuid=%d\n", getuid(), geteuid());
-    printf("=================================\n\n");
+    /* setuid/setgid + re-exec 이후 실제로 namespace 0(root)로 보이는지 확인 */
+    printf("[*] phase2 진입: getuid=%d geteuid=%d\n", getuid(), geteuid());
 
     /* ---------- 1단계: propagation을 private로 전환 ---------- */
     printf("[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private\n");
@@ -229,6 +220,8 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
 struct child_args {
     int pipe_read_fd;
     int pipe_write_fd;   /* clone()으로 물려받은 여분의 쓰기 끝. 자식이 직접 닫아야 함 */
+    uid_t map_uid;       /* uid_map에 쓴 값과 동일 (namespace 0에 대응하는 호스트 UID) */
+    gid_t map_gid;
     const char *lowerdir;   /* 콜론으로 연결된 이미지 레이어 경로들 */
     const char *upperdir;   /* 관리자가 이미 mkdir+chown까지 끝내둔 경로들 */
     const char *workdir;
@@ -254,14 +247,25 @@ static int child_entry(void *arg) {
     char buf;
     read(args->pipe_read_fd, &buf, 1); /* 부모가 close하면 0을 리턴하며 깨어남 */
     close(args->pipe_read_fd);
-    printf("[*] 매핑 완료 확인. capability 재계산을 위해 재실행합니다.\n");
+    printf("[*] 매핑 완료 확인.\n");
 
-    /* ---------- [임시 디버그] execve 직전 상태 확인 ---------- */
-    printf("\n===== DEBUG(child_entry, execve 직전): getuid/geteuid =====\n");
-    printf("getuid=%d geteuid=%d\n", getuid(), geteuid());
-    system("cat /proc/self/uid_map");
-    system("cat /proc/self/status | grep -i cap");
-    printf("=================================\n\n");
+    /*
+     * ---------- 핵심: 이 프로세스 자신의 real UID를 매핑값에 맞춤 ----------
+     * main()이 sudo로 실행됐기 때문에, clone()으로 태어난 이 자식도 real UID를
+     * 그대로 물려받아 host UID 0(진짜 root)이다. 근데 uid_map은
+     * "namespace 0 = host map_uid(예: 1000)"으로 써뒀다 - 매핑표에 host UID 0에
+     * 대한 항목이 없으므로, 지금 이 프로세스가 자기 자신을 namespace 관점에서
+     * 봐도 nobody(overflow uid)로 나온다 (uid_map 파일 내용과 무관하게).
+     * 지금은 아직 real UID가 host root라 setuid로 임의 UID를 가질 수 있으니,
+     * 매핑에 정확히 대응하는 host UID(map_uid)로 스스로를 바꿔야
+     * namespace 안에서 제대로 UID 0(root)으로 인식되고, 이어지는 execve에서도
+     * capability가 올바르게(namespace root 기준으로) 계산된다.
+     * setgid가 setuid보다 먼저여야 한다 - uid를 먼저 낮추면 CAP_SETGID를
+     * 잃어서 그 다음 setgid가 실패할 수 있다.
+     */
+    if (setgid(args->map_gid) != 0) die("setgid 실패");
+    if (setuid(args->map_uid) != 0) die("setuid 실패");
+    printf("[*] setuid(%u)/setgid(%u) 완료. 재실행합니다.\n", args->map_uid, args->map_gid);
 
     /*
      * ---------- re-exec: capability를 매핑된 UID 기준으로 재계산시킴 ----------
@@ -360,6 +364,8 @@ int main(int argc, char *argv[]) {
     struct child_args cargs = {
         .pipe_read_fd = pipefd[0],
         .pipe_write_fd = pipefd[1],
+        .map_uid = map_uid,
+        .map_gid = map_gid,
         .lowerdir = lowerdir,
         .upperdir = upperdir,
         .workdir = workdir,
