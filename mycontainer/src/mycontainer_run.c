@@ -203,8 +203,28 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     }
 
     /* ---------- 9단계: procfs 재마운트 ---------- */
-    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\", subset=pid)\n");
-    if (mount("proc", "/proc", "proc", 0, "subset=pid") != 0) {
+    /*
+     * subset=pid 옵션으로 "VFS: Mount too revealing" 체크를 우회하려
+     * 했으나 이 환경에서는 통하지 않았다 (실험으로 확인, 검색으로 찾은
+     * 커널 패치가 이 커널 버전/상황에는 적용 안 되는 것으로 보임).
+     *
+     * 진짜 원인: clone() 시점에 이 mount namespace는 호스트의 마운트
+     * 테이블을 통째로 복사해서 시작했고, 그 안에 /proc/sys/fs/binfmt_misc
+     * 같은 서브마운트가 그대로 남아있었다. MS_PRIVATE는 향후 전파만
+     * 끊을 뿐, 이미 상속된 이 서브마운트 자체를 지워주지 않는다.
+     * 그 상태에서 새 procfs를 덮어 마운트하면, 커널이 "이 서브마운트가
+     * 새 procfs에 완전히 가려지는 게 맞는지" 검사(fs_fully_visible)하다가
+     * 거부한 것.
+     *
+     * 정공법: 새 procfs를 마운트하기 전에, 상속받은 기존 /proc 마운트
+     * (그 서브마운트 포함) 자체를 먼저 통째로 걷어낸다. MNT_DETACH로
+     * lazy unmount하면 그 아래 서브마운트까지 함께 정리된다.
+     */
+    printf("[*] 9단계 사전 정리: 기존 /proc 마운트(서브마운트 포함) 제거\n");
+    umount2("/proc", MNT_DETACH); /* 실패해도(이미 없을 수도 있음) 무시하고 진행 */
+
+    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
         die("procfs 마운트 실패");
     }
 
