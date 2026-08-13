@@ -10,7 +10,7 @@ fi
 MEMORY="max"
 CPU="max"
 PIDS="max"
-ROOTFS_PATH="/home/dev/mycontainer/busybox_rootfs"   # 이번엔 lowerdir(이미지 레이어)로 사용됨
+ROOTFS_PATH="/home/dev/practice/mycontainer/busybox_rootfs"   # 이번엔 lowerdir(이미지 레이어)로 사용됨
 CONTAINER_DIR="/var/lib/mycontainer/containers/mycontainer-$$"  # upper/work/merged를 담을 디렉토리
 CMD=()
 
@@ -81,9 +81,12 @@ sudo ip link set "$VETH_HOST" up
 
 sudo ip netns exec "$NETNS_NAME" ip route add default via "$BRIDGE_GATEWAY_IP"
 
+# 상위 디렉토리 미리 생성하기.
+sudo mkdir -p "$(dirname "$CONTAINER_DIR")"
+
 # --- 여기만 기존 pivot_root_container에서 mycontainer_run으로 교체 ---
 # 인자 순서: <lowerdir> <컨테이너 작업디렉토리> <cgroup 경로> <netns 이름> <실행할 프로그램...>
-sudo ./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}"
+./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}"
 
 sudo rmdir "$CGROUP_PATH"
 sudo ip netns delete "$NETNS_NAME"

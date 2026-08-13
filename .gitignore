@@ -8,3 +8,10 @@ ns-clone-test/main
 
 # busybox 기반 rootfs (mycontainer/setup_rootfs.sh로 재생성)
 mycontainer/busybox_rootfs/
+
+# 커리큘럼
+curriculum.md
+
+# binaryfile
+mycontainer/src/mycontainer_run
+

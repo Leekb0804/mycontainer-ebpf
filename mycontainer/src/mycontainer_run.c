@@ -133,7 +133,98 @@ static void deny_setgroups(pid_t child_pid) {
     close(fd);
 }
 
-/* ---------- 자식(컨테이너) 쪽에서 실행할 로직 ---------- */
+/* ---------- phase2: execve() 이후에 실행되는 "진짜 컨테이너 진입" 로직 ---------- */
+/*
+ * clone() 직후에는 아직 execve()를 한 번도 거치지 않아서, uid_map으로 매핑을
+ * 마쳐도 capability(CapEff)가 전부 0인 상태로 남는다 (man capabilities(7):
+ * "이 값들의 재계산은 execve() 도중에 일어난다"). CAP_SYS_ADMIN이 필요한
+ * overlay 마운트를 이 상태로 시도하면 Permission denied가 난다.
+ * 그래서 이 함수는 child_entry가 execve("/proc/self/exe", ...)로 자기
+ * 자신을 다시 실행한 뒤에야 호출된다 - 그 시점에는 매핑된 UID(0) 기준으로
+ * capability가 재계산되어 있다.
+ */
+static void run_phase2(const char *lowerdir, const char *upperdir,
+                        const char *workdir, const char *mergeddir,
+                        char **cmd_argv) {
+    /* ---------- [임시 디버그] execve 이후 실제 상태 확인 ---------- */
+    printf("\n===== DEBUG(phase2): uid_map =====\n");
+    system("cat /proc/self/uid_map");
+    printf("===== DEBUG(phase2): capability =====\n");
+    system("cat /proc/self/status | grep -i cap");
+    printf("===== DEBUG(phase2): namespace ID =====\n");
+    system("readlink /proc/self/ns/mnt");
+    system("readlink /proc/self/ns/user");
+    printf("===== DEBUG(phase2): getuid/geteuid =====\n");
+    printf("getuid=%d geteuid=%d\n", getuid(), geteuid());
+    printf("=================================\n\n");
+
+    /* ---------- 1단계: propagation을 private로 전환 ---------- */
+    printf("[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private\n");
+    if (mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0) {
+        die("propagation private 설정 실패");
+    }
+
+    /* ---------- 2단계: overlay 마운트 ---------- */
+    char overlay_opts[PATH_MAX * 4];
+    snprintf(overlay_opts, sizeof(overlay_opts),
+             "lowerdir=%s,upperdir=%s,workdir=%s",
+             lowerdir, upperdir, workdir);
+
+    printf("[*] 2단계: overlay 마운트 -o %s\n", overlay_opts);
+    if (mount("overlay", mergeddir, "overlay", 0, overlay_opts) != 0) {
+        die("overlay 마운트 실패");
+    }
+
+    /* ---------- 3단계: mergeddir을 마운트 포인트로 승격 (self bind mount) ---------- */
+    printf("[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인\n");
+    if (mount(mergeddir, mergeddir, NULL, MS_BIND | MS_REC, NULL) != 0) {
+        die("self bind mount 실패");
+    }
+
+    /* ---------- 4단계: put_old 디렉토리 준비 ---------- */
+    char put_old[PATH_MAX];
+    snprintf(put_old, sizeof(put_old), "%s/.old_root", mergeddir);
+    printf("[*] 4단계: put_old 디렉토리 준비 (%s)\n", put_old);
+    if (mkdir(put_old, 0700) != 0 && errno != EEXIST) {
+        die("put_old mkdir 실패");
+    }
+
+    /* ---------- 5단계: pivot_root 실행 ---------- */
+    printf("[*] 5단계: pivot_root(merged, put_old) - root 자체를 교체\n");
+    if (pivot_root(mergeddir, put_old) != 0) {
+        die("pivot_root 실패");
+    }
+
+    /* ---------- 6단계: 작업 위치를 새 root로 이동 ---------- */
+    printf("[*] 6단계: chdir(\"/\")\n");
+    if (chdir("/") != 0) die("chdir 실패");
+
+    /* ---------- 7단계: 옛 root를 마운트 트리에서 완전히 제거 ---------- */
+    printf("[*] 7단계: umount2(\"/.old_root\", MNT_DETACH)\n");
+    if (umount2("/.old_root", MNT_DETACH) != 0) {
+        die("옛 root umount 실패");
+    }
+
+    /* ---------- 8단계: 빈 디렉토리 정리 ---------- */
+    printf("[*] 8단계: rmdir(\"/.old_root\")\n");
+    if (rmdir("/.old_root") != 0) {
+        fprintf(stderr, "[!] rmdir 경고: %s (계속 진행)\n", strerror(errno));
+    }
+
+    /* ---------- 9단계: procfs 재마운트 ---------- */
+    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
+    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
+        die("procfs 마운트 실패");
+    }
+
+    printf("\n[+] 컨테이너 진입 완료. execvp로 넘어갑니다.\n\n");
+
+    /* ---------- 10단계: 지정한 프로그램 실행 ---------- */
+    execvp(cmd_argv[0], cmd_argv);
+    die("execvp 실패");
+}
+
+/* ---------- 자식(컨테이너) 쪽에서 clone() 직후 실행할 로직 ---------- */
 
 struct child_args {
     int pipe_read_fd;
@@ -163,88 +254,61 @@ static int child_entry(void *arg) {
     char buf;
     read(args->pipe_read_fd, &buf, 1); /* 부모가 close하면 0을 리턴하며 깨어남 */
     close(args->pipe_read_fd);
-    printf("[*] 매핑 완료 확인. 진행합니다.\n");
+    printf("[*] 매핑 완료 확인. capability 재계산을 위해 재실행합니다.\n");
 
-    /* ---------- 1단계: propagation을 private로 전환 ---------- */
-    /* (예전 코드의 unshare(CLONE_NEWNS)는 clone() 시점에 이미 적용되어 삭제됨) */
-    printf("[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private\n");
-    if (mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0) {
-        die("propagation private 설정 실패");
-    }
+    /* ---------- [임시 디버그] execve 직전 상태 확인 ---------- */
+    printf("\n===== DEBUG(child_entry, execve 직전): getuid/geteuid =====\n");
+    printf("getuid=%d geteuid=%d\n", getuid(), geteuid());
+    system("cat /proc/self/uid_map");
+    system("cat /proc/self/status | grep -i cap");
+    printf("=================================\n\n");
 
-    /* ---------- 2단계: overlay 마운트 ---------- */
     /*
-     * upper/work/merged는 이미 관리자(main)가 clone() 이전에
-     * mkdir + chown(SUDO_UID)까지 끝내둔 상태다. 여기서 새로 mkdir하지 않는다 -
-     * 자식은 real UID가 여전히 root라서, 여기서 만들면 소유권이 root로
-     * 남아버리는 문제가 있었기 때문이다 (금요일에 확인한 버그).
+     * ---------- re-exec: capability를 매핑된 UID 기준으로 재계산시킴 ----------
+     * "/proc/self/exe"는 항상 지금 실행 중인 바이너리 자신을 가리키는 심볼릭
+     * 링크다. 이 경로로 스스로를 execve하면, 커널이 execve() 도중 규칙에
+     * 따라 (지금 매핑된 UID가 0이므로) capability를 전부 부여한 채로
+     * 다시 시작된다. 그 두 번째 실행을 "--phase2"로 표시해 main()이
+     * 구분하게 한다.
      */
-    char overlay_opts[PATH_MAX * 4];
-    snprintf(overlay_opts, sizeof(overlay_opts),
-             "lowerdir=%s,upperdir=%s,workdir=%s",
-             args->lowerdir, args->upperdir, args->workdir);
-
-    printf("[*] 2단계: overlay 마운트 -o %s\n", overlay_opts);
-    if (mount("overlay", args->mergeddir, "overlay", 0, overlay_opts) != 0) {
-        die("overlay 마운트 실패");
+    char *new_argv[7 + 32]; /* lowerdir/upper/work/merged 4개 + cmd 최대 32개 여유 */
+    int i = 0;
+    new_argv[i++] = "/proc/self/exe";
+    new_argv[i++] = "--phase2";
+    new_argv[i++] = (char *)args->lowerdir;
+    new_argv[i++] = (char *)args->upperdir;
+    new_argv[i++] = (char *)args->workdir;
+    new_argv[i++] = (char *)args->mergeddir;
+    for (int j = 0; args->cmd_argv[j] != NULL && i < 7 + 31; j++) {
+        new_argv[i++] = args->cmd_argv[j];
     }
+    new_argv[i] = NULL;
 
-    /* ---------- 3단계: mergeddir을 마운트 포인트로 승격 (self bind mount) ---------- */
-    /*
-     * overlay 마운트 자체로 mergeddir은 이미 마운트 포인트이긴 하지만,
-     * pivot_root 요구사항(new_root와 그 부모가 서로 다른 파일시스템이어야 함)을
-     * 명확히 만족시키기 위해 기존 코드와 동일하게 self bind mount를 유지한다.
-     */
-    printf("[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인\n");
-    if (mount(args->mergeddir, args->mergeddir, NULL, MS_BIND | MS_REC, NULL) != 0) {
-        die("self bind mount 실패");
-    }
-
-    /* ---------- 4단계: put_old 디렉토리 준비 ---------- */
-    char put_old[PATH_MAX];
-    snprintf(put_old, sizeof(put_old), "%s/.old_root", args->mergeddir);
-    printf("[*] 4단계: put_old 디렉토리 준비 (%s)\n", put_old);
-    if (mkdir(put_old, 0700) != 0 && errno != EEXIST) {
-        die("put_old mkdir 실패");
-    }
-
-    /* ---------- 5단계: pivot_root 실행 ---------- */
-    printf("[*] 5단계: pivot_root(merged, put_old) - root 자체를 교체\n");
-    if (pivot_root(args->mergeddir, put_old) != 0) {
-        die("pivot_root 실패");
-    }
-
-    /* ---------- 6단계: 작업 위치를 새 root로 이동 ---------- */
-    printf("[*] 6단계: chdir(\"/\")\n");
-    if (chdir("/") != 0) die("chdir 실패");
-
-    /* ---------- 7단계: 옛 root를 마운트 트리에서 완전히 제거 ---------- */
-    printf("[*] 7단계: umount2(\"/.old_root\", MNT_DETACH)\n");
-    if (umount2("/.old_root", MNT_DETACH) != 0) {
-        die("옛 root umount 실패");
-    }
-
-    /* ---------- 8단계: 빈 디렉토리 정리 ---------- */
-    printf("[*] 8단계: rmdir(\"/.old_root\")\n");
-    if (rmdir("/.old_root") != 0) {
-        fprintf(stderr, "[!] rmdir 경고: %s (계속 진행)\n", strerror(errno));
-    }
-
-    /* ---------- 9단계: procfs 재마운트 ---------- */
-    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
-        die("procfs 마운트 실패");
-    }
-
-    printf("\n[+] 컨테이너 진입 완료. execvp로 넘어갑니다.\n\n");
-
-    /* ---------- 10단계: 지정한 프로그램 실행 ---------- */
-    execvp(args->cmd_argv[0], args->cmd_argv);
-    die("execvp 실패");
+    extern char **environ;
+    execve("/proc/self/exe", new_argv, environ);
+    die("phase2 재실행(execve) 실패");
     return 1;
 }
 
 int main(int argc, char *argv[]) {
+    /*
+     * ---------- phase2 분기 ----------
+     * child_entry가 execve("/proc/self/exe", ...)로 재실행할 때 이 분기를
+     * 탄다. 이 시점은 capability가 매핑된 UID(0) 기준으로 재계산된 이후라,
+     * 여기서 바로 overlay 마운트를 포함한 나머지 단계를 진행해도 된다.
+     * clone/pipe/uid_map 설정은 이미 첫 번째 실행에서 다 끝난 뒤이므로
+     * 다시 하지 않는다.
+     */
+    if (argc >= 6 && strcmp(argv[1], "--phase2") == 0) {
+        const char *lowerdir = argv[2];
+        const char *upperdir = argv[3];
+        const char *workdir = argv[4];
+        const char *mergeddir = argv[5];
+        char **cmd_argv = &argv[6];
+        run_phase2(lowerdir, upperdir, workdir, mergeddir, cmd_argv);
+        return 1; /* run_phase2는 성공 시 execvp로 넘어가 여기로 안 돌아옴 */
+    }
+
     if (argc < 6) {
         fprintf(stderr,
             "사용법: %s <lowerdir 콜론연결> <컨테이너 작업디렉토리> <cgroup 경로> "
