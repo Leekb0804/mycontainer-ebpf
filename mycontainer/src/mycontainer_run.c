@@ -221,7 +221,13 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
      * lazy unmount하면 그 아래 서브마운트까지 함께 정리된다.
      */
     printf("[*] 9단계 사전 정리: 기존 /proc 마운트(서브마운트 포함) 제거\n");
-    umount2("/proc", MNT_DETACH); /* 실패해도(이미 없을 수도 있음) 무시하고 진행 */
+    int umount_result = umount2("/proc", MNT_DETACH);
+    printf("[*] DEBUG: umount2(/proc) 결과=%d (%s)\n", umount_result,
+           umount_result == 0 ? "성공" : strerror(errno));
+
+    printf("[*] DEBUG: 현재 마운트 목록 -----\n");
+    system("cat /proc/self/mountinfo 2>&1 || echo '(mountinfo 읽기 실패 - /proc 이미 언마운트됨)'");
+    printf("[*] DEBUG: -----\n");
 
     printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
