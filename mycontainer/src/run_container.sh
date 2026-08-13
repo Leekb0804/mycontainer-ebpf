@@ -1,14 +1,21 @@
 #!/bin/bash
 set -e
 
+# 소스가 바뀌었거나 바이너리가 없으면 재컴파일
+if [[ ! -x ./mycontainer_run || mycontainer_run.c -nt ./mycontainer_run ]]; then
+    echo "[*] mycontainer_run.c 컴파일 중..."
+    gcc -Wall -o mycontainer_run mycontainer_run.c
+fi
+
 MEMORY="max"
 CPU="max"
 PIDS="max"
-ROOTFS_PATH="/home/dev/mycontainer/busybox_rootfs"
+ROOTFS_PATH="/home/dev/mycontainer/busybox_rootfs"   # 이번엔 lowerdir(이미지 레이어)로 사용됨
+CONTAINER_DIR="/var/lib/mycontainer/containers/mycontainer-$$"  # upper/work/merged를 담을 디렉토리
 CMD=()
 
 if [[ "$1" == "run" ]]; then
-	shift
+    shift
 fi
 
 while [[ $# -gt 0 ]]; do
@@ -55,7 +62,7 @@ VETH_PEER_IP="10.0.0.11/24"
 BRIDGE_IP="10.0.0.1/24"
 BRIDGE_GATEWAY_IP="10.0.0.1"
 
-sudo ip netns exec "$NETNS_NAME" ip addr add "$VETH_PEER_IP" dev "$VETH_PEER" 
+sudo ip netns exec "$NETNS_NAME" ip addr add "$VETH_PEER_IP" dev "$VETH_PEER"
 sudo ip netns exec "$NETNS_NAME" ip link set "$VETH_PEER" up
 sudo ip netns exec "$NETNS_NAME" ip link set lo up
 
@@ -67,7 +74,6 @@ sudo ip link show br0 2> /dev/null || {
     sudo iptables -t nat -A POSTROUTING -s 10.0.0.0/24 -o enp0s1 -j MASQUERADE
     sudo iptables -A FORWARD -i br0 -o enp0s1 -j ACCEPT
     sudo iptables -A FORWARD -i enp0s1 -o br0 -m state --state RELATED,ESTABLISHED -j ACCEPT
-
 }
 
 sudo ip link set "$VETH_HOST" master br0
@@ -75,16 +81,9 @@ sudo ip link set "$VETH_HOST" up
 
 sudo ip netns exec "$NETNS_NAME" ip route add default via "$BRIDGE_GATEWAY_IP"
 
-sudo ./pivot_root_container "$ROOTFS_PATH" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}"
+# --- 여기만 기존 pivot_root_container에서 mycontainer_run으로 교체 ---
+# 인자 순서: <lowerdir> <컨테이너 작업디렉토리> <cgroup 경로> <netns 이름> <실행할 프로그램...>
+sudo ./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}"
 
-if ! sudo rmdir "$CGROUP_PATH"; then
-    echo "[DEBUG] rmdir 실패! 진단 정보 수집 중..."
-    echo "[DEBUG] cgroup.procs 내용:"
-    cat "$CGROUP_PATH/cgroup.procs" 2>/dev/null
-    echo "[DEBUG] 관련 프로세스 확인:"
-    ps aux | grep -i "pivot_root_container\|busybox\|/bin/sh"
-    echo "[DEBUG] cgroup 디렉토리 상태:"
-    ls -la "$CGROUP_PATH"
-fi
-
+sudo rmdir "$CGROUP_PATH"
 sudo ip netns delete "$NETNS_NAME"
