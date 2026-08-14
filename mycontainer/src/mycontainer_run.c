@@ -180,6 +180,11 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
         die("put_old mkdir 실패");
     }
 
+    /* ---------- [디버그] pivot_root 이전, 아직 procfs가 살아있는 시점의 마운트 목록 ---------- */
+    printf("[*] DEBUG(pivot_root 이전): 현재 마운트 목록 -----\n");
+    system("cat /proc/self/mountinfo 2>&1");
+    printf("[*] DEBUG: -----\n");
+
     /* ---------- 5단계: pivot_root 실행 ---------- */
     printf("[*] 5단계: pivot_root(merged, put_old) - root 자체를 교체\n");
     if (pivot_root(mergeddir, put_old) != 0) {
@@ -220,15 +225,6 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
      * (그 서브마운트 포함) 자체를 먼저 통째로 걷어낸다. MNT_DETACH로
      * lazy unmount하면 그 아래 서브마운트까지 함께 정리된다.
      */
-    printf("[*] 9단계 사전 정리: 기존 /proc 마운트(서브마운트 포함) 제거\n");
-    int umount_result = umount2("/proc", MNT_DETACH);
-    printf("[*] DEBUG: umount2(/proc) 결과=%d (%s)\n", umount_result,
-           umount_result == 0 ? "성공" : strerror(errno));
-
-    printf("[*] DEBUG: 현재 마운트 목록 -----\n");
-    system("cat /proc/self/mountinfo 2>&1 || echo '(mountinfo 읽기 실패 - /proc 이미 언마운트됨)'");
-    printf("[*] DEBUG: -----\n");
-
     printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
     if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
         die("procfs 마운트 실패");
