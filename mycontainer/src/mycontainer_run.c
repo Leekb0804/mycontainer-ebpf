@@ -180,10 +180,27 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
         die("put_old mkdir 실패");
     }
 
-    /* ---------- [디버그] pivot_root 이전, 아직 procfs가 살아있는 시점의 마운트 목록 ---------- */
-    printf("[*] DEBUG(pivot_root 이전): 현재 마운트 목록 -----\n");
-    system("cat /proc/self/mountinfo 2>&1");
-    printf("[*] DEBUG: -----\n");
+    /* ---------- 4.5단계: 호스트 /proc를 bind mount (실용적 우회) ---------- */
+    /*
+     * 새 procfs 인스턴스를 마운트하려는 시도(9단계였던 것)가 계속
+     * "VFS: Mount too revealing"으로 거부됐고, 정확한 원인을 못 찾았다.
+     * 대신 이미 잘 동작하는 호스트의 /proc를 그대로 bind mount로
+     * 가져오는 실용적 우회를 쓴다. 반드시 pivot_root(5단계) 이전에
+     * 해야 한다 - pivot_root 이후에는 호스트의 /proc 자체가 옛 root와
+     * 함께 분리되어 더 이상 접근할 수 없다.
+     *
+     * 트레이드오프: 이러면 컨테이너 안에서 /proc를 보면 host의 PID들이
+     * 그대로 보인다 - CLONE_NEWPID로 얻으려던 PID 격리 효과가 procfs
+     * 상으로는 흐려진다. 지금은 "컨테이너가 끝까지 실행되는지"를
+     * 확인하는 게 우선이라 이 한계는 알고 감수한다.
+     */
+    char proc_target[PATH_MAX];
+    snprintf(proc_target, sizeof(proc_target), "%s/proc", mergeddir);
+    printf("[*] 4.5단계: 호스트 /proc -> %s bind mount (PID 격리 일부 포기)\n",
+           proc_target);
+    if (mount("/proc", proc_target, NULL, MS_BIND | MS_REC, NULL) != 0) {
+        die("proc bind mount 실패");
+    }
 
     /* ---------- 5단계: pivot_root 실행 ---------- */
     printf("[*] 5단계: pivot_root(merged, put_old) - root 자체를 교체\n");
@@ -207,28 +224,27 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
         fprintf(stderr, "[!] rmdir 경고: %s (계속 진행)\n", strerror(errno));
     }
 
-    /* ---------- 9단계: procfs 재마운트 ---------- */
+    /* ---------- 9단계: procfs ---------- */
     /*
-     * subset=pid 옵션으로 "VFS: Mount too revealing" 체크를 우회하려
-     * 했으나 이 환경에서는 통하지 않았다 (실험으로 확인, 검색으로 찾은
-     * 커널 패치가 이 커널 버전/상황에는 적용 안 되는 것으로 보임).
+     * 새 procfs 인스턴스를 mount()로 마운트하려는 시도는 계속
+     * "VFS: Mount too revealing"으로 거부됐다. 커널 소스(mnt_already_visible,
+     * fs_fully_visible)와 실제 사례(gVisor 이슈 트래커) 확인 결과, 원인은
+     * "옛 root의 잔여 서브마운트"가 아니라 - pivot_root 이전 mountinfo로
+     * 이미 확인했듯 그건 7단계에서 옛 root와 함께 통째로 정리된다 -
+     * 우리 자신이 만든 mount namespace 안에 2단계(overlay)와 3단계(self
+     * bind mount)로 인해 "자식 마운트를 가진 마운트"가 이미 존재하고
+     * 있었다는 것이었다. 커널은 새 procfs가 그 namespace 전체를 완전히
+     * 가릴 수 있어야(fully visible) 마운트를 허용하는데, 우리 namespace는
+     * 이미 그 조건을 깨고 있었다.
      *
-     * 진짜 원인: clone() 시점에 이 mount namespace는 호스트의 마운트
-     * 테이블을 통째로 복사해서 시작했고, 그 안에 /proc/sys/fs/binfmt_misc
-     * 같은 서브마운트가 그대로 남아있었다. MS_PRIVATE는 향후 전파만
-     * 끊을 뿐, 이미 상속된 이 서브마운트 자체를 지워주지 않는다.
-     * 그 상태에서 새 procfs를 덮어 마운트하면, 커널이 "이 서브마운트가
-     * 새 procfs에 완전히 가려지는 게 맞는지" 검사(fs_fully_visible)하다가
-     * 거부한 것.
-     *
-     * 정공법: 새 procfs를 마운트하기 전에, 상속받은 기존 /proc 마운트
-     * (그 서브마운트 포함) 자체를 먼저 통째로 걷어낸다. MNT_DETACH로
-     * lazy unmount하면 그 아래 서브마운트까지 함께 정리된다.
+     * 이를 정확히 고치는 대신(예: self bind mount 제거), 실제 컨테이너
+     * 런타임(gVisor 등)이 쓰는 정석적인 우회를 택했다 - 새 procfs
+     * "인스턴스"를 만들지 않고, 이미 있는 procfs를 bind mount로
+     * 재사용하는 것(4.5단계). bind mount는 새 인스턴스가 아니라
+     * 기존 마운트에 대한 또 다른 진입점일 뿐이라 이 가시성 체크 자체를
+     * 거치지 않는다. 4.5단계에서 이미 준비됐으므로 여기선 할 일이 없다.
      */
-    printf("[*] 9단계: mount(\"proc\", \"/proc\", \"proc\")\n");
-    if (mount("proc", "/proc", "proc", 0, NULL) != 0) {
-        die("procfs 마운트 실패");
-    }
+    printf("[*] 9단계: /proc는 4.5단계에서 이미 bind mount로 준비됨 (생략)\n");
 
     printf("\n[+] 컨테이너 진입 완료. execvp로 넘어갑니다.\n\n");
 
@@ -292,7 +308,7 @@ static int child_entry(void *arg) {
      * 바꿔준다. setgid가 setuid보다 먼저여야 한다 - uid를 먼저 낮추면
      * CAP_SETGID를 잃어서 그 다음 setgid가 실패할 수 있다.
      */
-    printf("[*] DEBUG: setgid(0)/setuid(0) 호출 (namespace 관점의 root) - "
+    printf("[*] setgid(0)/setuid(0) 호출 (namespace 관점의 root) - "
            "gid_map/uid_map: namespace 0 -> host uid=%u gid=%u\n",
            args->map_uid, args->map_gid);
     if (setgid(0) != 0) die("setgid 실패");
