@@ -167,6 +167,13 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     }
 
     /* ---------- 3단계: mergeddir을 마운트 포인트로 승격 (self bind mount) ---------- */
+    /*
+     * 실험: 이 단계가 procfs "Mount too revealing" 문제의 원인인지
+     * 확인하려고 제거해봤으나, 제거해도 동일하게 실패했다. 즉 원인이
+     * 아니었음이 확인됨 - overlay 마운트(2단계) 자체가 원인일 가능성이
+     * 높다. self bind mount는 원래 목적(pivot_root가 요구하는 마운트
+     * 포인트 승격)대로 유지한다.
+     */
     printf("[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인\n");
     if (mount(mergeddir, mergeddir, NULL, MS_BIND | MS_REC, NULL) != 0) {
         die("self bind mount 실패");
@@ -182,12 +189,18 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
 
     /* ---------- 4.5단계: 호스트 /proc를 bind mount (실용적 우회) ---------- */
     /*
-     * 새 procfs 인스턴스를 마운트하려는 시도(9단계였던 것)가 계속
-     * "VFS: Mount too revealing"으로 거부됐고, 정확한 원인을 못 찾았다.
-     * 대신 이미 잘 동작하는 호스트의 /proc를 그대로 bind mount로
-     * 가져오는 실용적 우회를 쓴다. 반드시 pivot_root(5단계) 이전에
-     * 해야 한다 - pivot_root 이후에는 호스트의 /proc 자체가 옛 root와
-     * 함께 분리되어 더 이상 접근할 수 없다.
+     * 새 procfs 인스턴스를 mount()로 마운트하려는 시도는 계속
+     * "VFS: Mount too revealing"으로 거부됐다. self bind mount(3단계)를
+     * 제거하는 실험도 해봤지만 동일하게 실패해서, 원인이 3단계가 아니라
+     * overlay 마운트(2단계) 자체와 얽혀 있다는 게 확인됐다 - overlay를
+     * 없앨 수는 없으니(컨테이너의 핵심 기능), 정확한 근본 수정보다
+     * 실제 컨테이너 런타임(gVisor 등)이 쓰는 정석적인 우회를 택한다:
+     * 새 procfs 인스턴스를 만들지 않고, 이미 있는(호스트) procfs를
+     * bind mount로 재사용한다. bind mount는 새 인스턴스가 아니라 기존
+     * 마운트에 대한 또 다른 진입점일 뿐이라 이 가시성 체크를 안 거친다.
+     * 반드시 pivot_root(5단계) 이전에 해야 한다 - pivot_root 이후에는
+     * 호스트의 /proc 자체가 옛 root와 함께 분리되어 더 이상 접근할
+     * 수 없다.
      *
      * 트레이드오프: 이러면 컨테이너 안에서 /proc를 보면 host의 PID들이
      * 그대로 보인다 - CLONE_NEWPID로 얻으려던 PID 격리 효과가 procfs
@@ -225,25 +238,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     }
 
     /* ---------- 9단계: procfs ---------- */
-    /*
-     * 새 procfs 인스턴스를 mount()로 마운트하려는 시도는 계속
-     * "VFS: Mount too revealing"으로 거부됐다. 커널 소스(mnt_already_visible,
-     * fs_fully_visible)와 실제 사례(gVisor 이슈 트래커) 확인 결과, 원인은
-     * "옛 root의 잔여 서브마운트"가 아니라 - pivot_root 이전 mountinfo로
-     * 이미 확인했듯 그건 7단계에서 옛 root와 함께 통째로 정리된다 -
-     * 우리 자신이 만든 mount namespace 안에 2단계(overlay)와 3단계(self
-     * bind mount)로 인해 "자식 마운트를 가진 마운트"가 이미 존재하고
-     * 있었다는 것이었다. 커널은 새 procfs가 그 namespace 전체를 완전히
-     * 가릴 수 있어야(fully visible) 마운트를 허용하는데, 우리 namespace는
-     * 이미 그 조건을 깨고 있었다.
-     *
-     * 이를 정확히 고치는 대신(예: self bind mount 제거), 실제 컨테이너
-     * 런타임(gVisor 등)이 쓰는 정석적인 우회를 택했다 - 새 procfs
-     * "인스턴스"를 만들지 않고, 이미 있는 procfs를 bind mount로
-     * 재사용하는 것(4.5단계). bind mount는 새 인스턴스가 아니라
-     * 기존 마운트에 대한 또 다른 진입점일 뿐이라 이 가시성 체크 자체를
-     * 거치지 않는다. 4.5단계에서 이미 준비됐으므로 여기선 할 일이 없다.
-     */
+    /* 4.5단계에서 이미 bind mount로 준비됐으므로 여기선 별도 작업 없음 */
     printf("[*] 9단계: /proc는 4.5단계에서 이미 bind mount로 준비됨 (생략)\n");
 
     printf("\n[+] 컨테이너 진입 완료. execvp로 넘어갑니다.\n\n");
