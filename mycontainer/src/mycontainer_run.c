@@ -149,6 +149,11 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     /* setuid/setgid + re-exec 이후 실제로 namespace 0(root)로 보이는지 확인 */
     printf("[*] phase2 진입: getuid=%d geteuid=%d\n", getuid(), geteuid());
 
+    /*hostname 설정*/
+    if (sethostname("mycontainer", strlen("mycontainer")) != 0) {
+        die("sethostname 실패");
+    }
+
     /* ---------- 1단계: propagation을 private로 전환 ---------- */
     printf("[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private\n");
     if (mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0) {
@@ -422,8 +427,8 @@ int main(int argc, char *argv[]) {
 
     printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD) 호출\n");
     pid_t child_pid = clone(child_entry, stack_top,
-                             CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | SIGCHLD,
-                             &cargs);
+                         CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | SIGCHLD,
+                         &cargs);
     if (child_pid == -1) die("clone 실패");
 
     /* 부모는 파이프의 쓰기 끝만 쓰고, 읽기 끝은 자식 것이므로 부모는 안 씀 */
