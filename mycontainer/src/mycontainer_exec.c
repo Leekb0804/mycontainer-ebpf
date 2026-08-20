@@ -103,32 +103,40 @@ static int open_ns_fd(pid_t pid, const char *ns_name) {
 /*
  * cgroup은 setns() 대상이 아니라 "가입"의 개념이다 (CLONE_NEWCGROUP이라는
  * 별도 namespace가 있긴 하지만 mycontainer_run.c가 그걸 쓰지 않으므로
- * 여기서도 다루지 않는다). mycontainer_run.c의 join_cgroup()과 완전히
- * 동일한 방식: cgroup.procs 파일에 내 PID를 쓰면 그 cgroup의 제한을
- * 받게 된다. 이 함수는 자식 프로세스 안에서, 자기 자신의 PID를 쓰기
- * 위해 호출한다.
+ * 여기서도 다루지 않는다).
+ *
+ * 주의: cgroup.procs의 "경로"(/sys/fs/cgroup/...)는 호스트 mount
+ * namespace 기준이다. setns(CLONE_NEWNS)로 컨테이너의 mount namespace
+ * (pivot_root된 rootfs)로 넘어간 뒤에는 이 경로가 더 이상 보이지 않는다
+ * - target ns fd들을 fork 전에 미리 열어두는 것과 완전히 같은 이유로,
+ * cgroup.procs의 fd도 반드시 setns(MNT) 하기 전(즉 아직 호스트 mount
+ * namespace에 있을 때)에 미리 열어둬야 한다. 그래서 이 함수는 "경로를
+ * 열어서 fd를 반환"만 하고, 실제 write(자기 PID 쓰기)는 자식이 나중에
+ * (mnt 재진입 이후) 그 fd에 대고 한다 - fd 자체는 mount namespace가
+ * 바뀌어도 계속 유효하다.
  */
-static void join_cgroup(const char *cgroup_path) {
-    pid_t my_pid = getpid();
-    char pid_str[16];
-    snprintf(pid_str, sizeof(pid_str), "%d", my_pid);
-
+static int open_cgroup_procs_fd(const char *cgroup_path) {
     char procs_file[PATH_MAX];
     snprintf(procs_file, sizeof(procs_file), "%s/cgroup.procs", cgroup_path);
 
     int fd = open(procs_file, O_WRONLY);
     if (fd < 0) {
         fprintf(stderr, "[!] cgroup.procs open 실패: %s\n", procs_file);
-        die("join_cgroup");
+        die("open_cgroup_procs_fd");
     }
+    return fd;
+}
+
+/* 이미 열려있는 cgroup.procs fd에 현재(호출한) 프로세스의 PID를 쓴다 */
+static void join_cgroup_via_fd(int fd) {
+    pid_t my_pid = getpid();
+    char pid_str[16];
+    snprintf(pid_str, sizeof(pid_str), "%d", my_pid);
 
     ssize_t n = write(fd, pid_str, strlen(pid_str));
     if (n != (ssize_t)strlen(pid_str)) {
-        close(fd);
         die("cgroup.procs write 실패");
     }
-
-    close(fd);
 }
 
 int main(int argc, char *argv[]) {
@@ -156,6 +164,12 @@ int main(int argc, char *argv[]) {
     int fd_mnt = open_ns_fd(target_pid, "mnt");
     int fd_net = open_ns_fd(target_pid, "net");
     int fd_uts = open_ns_fd(target_pid, "uts");
+
+    /*
+     * cgroup.procs도 마찬가지 이유로 fork/setns(MNT) 전에 미리 열어둔다.
+     * (자세한 이유는 open_cgroup_procs_fd() 주석 참고)
+     */
+    int fd_cgroup_procs = open_cgroup_procs_fd(cgroup_path);
 
     /* ---------- 2단계: PID namespace는 fork() 전에 미리 setns ---------- */
     /*
@@ -193,13 +207,14 @@ int main(int argc, char *argv[]) {
         close(fd_uts);
 
         /*
-         * cgroup 가입은 namespace 재진입이 아니라 cgroup.procs에
-         * 내 PID를 쓰는 것 - mnt/net/uts와 순서상 특별한 제약은 없지만,
-         * "namespace 재진입을 다 마친 뒤 마지막으로 리소스 제한을
-         * 건다"는 순서가 읽기에 자연스러워 execvp 직전에 둔다.
+         * cgroup 가입: fd는 fork 전에 이미 열어뒀으니(open_cgroup_procs_fd),
+         * 여기서는 그 fd에 내 PID를 쓰기만 하면 된다. mount namespace가
+         * 바뀐 뒤라도 fd 자체(커널 내부 파일 객체를 가리키는 참조)는
+         * 여전히 유효하다 - 경로 재탐색이 필요 없다.
          */
-        printf("[*] (child) cgroup 가입: %s\n", cgroup_path);
-        join_cgroup(cgroup_path);
+        printf("[*] (child) cgroup 가입\n");
+        join_cgroup_via_fd(fd_cgroup_procs);
+        close(fd_cgroup_procs);
 
         printf("[*] (child) execvp 진입: %s\n", cmd_argv[0]);
         execvp(cmd_argv[0], cmd_argv);
@@ -210,6 +225,7 @@ int main(int argc, char *argv[]) {
     close(fd_net);
     close(fd_mnt);
     close(fd_uts);
+    close(fd_cgroup_procs);
 
     int status;
     waitpid(child, &status, 0);
