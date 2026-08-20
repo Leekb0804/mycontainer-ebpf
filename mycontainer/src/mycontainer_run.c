@@ -2,6 +2,8 @@
  * mycontainer_run.c
  *
  * 5주차 통합본: OverlayFS + User Namespace + 기존 pivot_root/cgroup/netns 로직
+ * 6주차: 상태 파일(state) 기록 추가 - exec/ps/stop이 나중에 이 파일을 읽어
+ *        target PID/cgroup/netns를 찾음
  *
  * 구조:
  *   main()        = "관리자" 역할. cgroup/netns 설정, overlay용 디렉토리 준비,
@@ -78,6 +80,40 @@ static void set_netns(const char *netns_name) {
     close(fd);
 }
 
+/*
+ * ---------- 6주차: 상태 파일 기록 ----------
+ * container_dir/state 에 key=value 형식으로 기록한다.
+ * exec/ps/stop이 나중에 이 파일을 읽어서 target PID, cgroup 경로, netns
+ * 이름을 찾는다. clone() 직후 ~ waitpid() 이전 시점에 호출해야
+ * "컨테이너가 떠 있는 동안" 다른 프로세스가 이 파일을 읽을 수 있다.
+ *
+ * 형식이 mycontainer_exec.c의 read_target_pid()가 기대하는 "PID=<숫자>"
+ * 줄과 일치해야 한다.
+ */
+static void write_state_file(const char *container_dir, pid_t pid,
+                              const char *cgroup_path, const char *netns_name,
+                              const char *mergeddir) {
+    char state_path[PATH_MAX];
+    snprintf(state_path, sizeof(state_path), "%s/state", container_dir);
+
+    FILE *f = fopen(state_path, "w");
+    if (!f) die("state 파일 생성 실패");
+
+    fprintf(f, "PID=%d\n", pid);
+    fprintf(f, "CGROUP_PATH=%s\n", cgroup_path);
+    fprintf(f, "NETNS_NAME=%s\n", netns_name);
+    fprintf(f, "MERGEDDIR=%s\n", mergeddir);
+
+    fclose(f);
+}
+
+/* 컨테이너 종료 후 state 파일 제거 (ps에서 죽은 컨테이너로 안 보이게) */
+static void remove_state_file(const char *container_dir) {
+    char state_path[PATH_MAX];
+    snprintf(state_path, sizeof(state_path), "%s/state", container_dir);
+    unlink(state_path); /* 실패해도 치명적이지 않으므로 반환값 무시 */
+}
+
 /* ---------- uid_map / gid_map 작성 (관리자 쪽에서 호출) ---------- */
 
 /*
@@ -149,7 +185,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     /* setuid/setgid + re-exec 이후 실제로 namespace 0(root)로 보이는지 확인 */
     printf("[*] phase2 진입: getuid=%d geteuid=%d\n", getuid(), geteuid());
 
-    /*hostname 설정*/
+    /* hostname 설정 (UTS namespace 격리 확인용) */
     if (sethostname("mycontainer", strlen("mycontainer")) != 0) {
         die("sethostname 실패");
     }
@@ -425,7 +461,7 @@ int main(int argc, char *argv[]) {
     if (!stack) die("스택 할당 실패");
     char *stack_top = stack + STACK_SIZE;
 
-    printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|SIGCHLD) 호출\n");
+    printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출\n");
     pid_t child_pid = clone(child_entry, stack_top,
                          CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | SIGCHLD,
                          &cargs);
@@ -446,9 +482,21 @@ int main(int argc, char *argv[]) {
     /* 매핑 완료 신호: 쓰기 끝을 닫으면 자식의 read()가 0을 리턴하며 깨어남 */
     close(pipefd[1]);
 
+    /*
+     * ---------- 6주차: 상태 파일 기록 ----------
+     * waitpid()로 블로킹되기 전에 반드시 써야 한다. mycontainer_run은
+     * 컨테이너가 끝날 때까지 여기서 대기하므로, 그 "대기 중"에 다른
+     * 터미널의 exec/ps가 이 파일을 읽어서 컨테이너를 찾아야 하기 때문.
+     */
+    write_state_file(container_dir, child_pid, cgroup_path, netns_name, mergeddir);
+    printf("[*] state 파일 기록 완료: %s/state (PID=%d)\n", container_dir, child_pid);
+
     /* ---------- 자식 종료까지 대기 ---------- */
     int status;
     waitpid(child_pid, &status, 0);
+
+    /* 컨테이너 종료 -> state 파일도 정리 (ps에서 죽은 컨테이너로 안 보이게) */
+    remove_state_file(container_dir);
 
     free(stack);
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
