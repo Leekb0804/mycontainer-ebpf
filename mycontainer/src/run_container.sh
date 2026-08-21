@@ -86,7 +86,6 @@ sudo mkdir -p "$(dirname "$CONTAINER_DIR")"
 
 # --- 여기만 기존 pivot_root_container에서 mycontainer_run으로 교체 ---
 # 인자 순서: <lowerdir> <컨테이너 작업디렉토리> <cgroup 경로> <netns 이름> <실행할 프로그램...>
-./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}"
-
-sudo rmdir "$CGROUP_PATH"
-sudo ip netns delete "$NETNS_NAME"
+./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}" || true
+sudo rmdir "$CGROUP_PATH" || echo "[!] cgroup 정리 실패: $CGROUP_PATH (계속 진행)"
+sudo ip netns delete "$NETNS_NAME" || echo "[!] netns 정리 실패: $NETNS_NAME (계속 진행)"
