@@ -7,6 +7,13 @@ if [[ ! -x ./mycontainer_run || mycontainer_run.c -nt ./mycontainer_run ]]; then
     gcc -Wall -o mycontainer_run mycontainer_run.c
 fi
 
+# eBPF 감시 등록 도구 (부가 기능): libbpf가 없어 빌드가 실패해도 컨테이너는 그대로 뜬다
+if [[ ! -x ./register_cgroup || register_cgroup.c -nt ./register_cgroup ]]; then
+    echo "[*] register_cgroup.c 컴파일 중..."
+    gcc -Wall -o register_cgroup register_cgroup.c -lbpf \
+        || echo "[!] register_cgroup 빌드 실패 - eBPF 감시 없이 진행"
+fi
+
 MEMORY="max"
 CPU="max"
 PIDS="max"
@@ -86,6 +93,16 @@ sudo mkdir -p "$(dirname "$CONTAINER_DIR")"
 
 # --- 여기만 기존 pivot_root_container에서 mycontainer_run으로 교체 ---
 # 인자 순서: <lowerdir> <컨테이너 작업디렉토리> <cgroup 경로> <netns 이름> <실행할 프로그램...>
+# eBPF 감시 등록 (부가 기능): 실패해도 컨테이너 실행은 계속한다
+if [[ -x ./register_cgroup ]]; then
+    sudo ./register_cgroup add "$CGROUP_PATH" || echo "[!] eBPF 감시 등록 실패 (계속 진행)"
+fi
+
 ./mycontainer_run "$ROOTFS_PATH" "$CONTAINER_DIR" "$CGROUP_PATH" "$NETNS_NAME" "${CMD[@]}" || true
+
+# 감시 해제는 cgroup을 지우기 전에 해야 한다 (inode로 cgroup id를 구하므로)
+if [[ -x ./register_cgroup ]]; then
+    sudo ./register_cgroup del "$CGROUP_PATH" || echo "[!] eBPF 감시 해제 실패 (계속 진행)"
+fi
 sudo rmdir "$CGROUP_PATH" || echo "[!] cgroup 정리 실패: $CGROUP_PATH (계속 진행)"
 sudo ip netns delete "$NETNS_NAME" || echo "[!] netns 정리 실패: $NETNS_NAME (계속 진행)"

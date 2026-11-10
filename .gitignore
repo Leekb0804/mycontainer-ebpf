@@ -14,4 +14,9 @@ curriculum.md
 
 # binaryfile
 mycontainer/src/mycontainer_run
+mycontainer/src/mycontainer_exec
+mycontainer/src/mycontainer_ps
+mycontainer/src/mycontainer_stop
+mycontainer/src/ebpf-observe/vmlinux.h
 
+mycontainer/src/register_cgroup
