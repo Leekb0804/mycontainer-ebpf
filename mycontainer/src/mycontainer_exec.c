@@ -42,6 +42,7 @@
 #include <sys/wait.h>
 #include <sys/syscall.h>
 #include <linux/sched.h>
+#include "mycontainer_state.h"
 
 static void die(const char *msg) {
     fprintf(stderr, "[!] %s: %s\n", msg, strerror(errno));
@@ -57,8 +58,10 @@ static int do_setns(int fd, int nstype) {
  * state 파일(container_dir/state)에서 "PID=1234", "CGROUP_PATH=..." 줄을
  * 찾아 각각 out_pid/out_cgroup_path에 채워준다.
  * 형식은 mycontainer_run.c의 write_state_file()과 일치해야 함.
+ * STARTTIME이 없는 옛 state 파일이면 *out_starttime = 0 (이후 검증에서 실패).
  */
 static void read_state(const char *container_dir, pid_t *out_pid,
+                        unsigned long long *out_starttime,
                         char *out_cgroup_path, size_t cgroup_path_size) {
     char state_path[PATH_MAX];
     snprintf(state_path, sizeof(state_path), "%s/state", container_dir);
@@ -68,13 +71,17 @@ static void read_state(const char *container_dir, pid_t *out_pid,
 
     char line[256];
     pid_t pid = -1;
+    unsigned long long starttime = 0;
     out_cgroup_path[0] = '\0';
     while (fgets(line, sizeof(line), f) != NULL) {
         int val;
+        unsigned long long ull;
         char path_buf[PATH_MAX];
 
         if (sscanf(line, "PID=%d", &val) == 1) {
             pid = (pid_t)val;
+        } else if (sscanf(line, "STARTTIME=%llu", &ull) == 1) {
+            starttime = ull;
         } else if (sscanf(line, "CGROUP_PATH=%s", path_buf) == 1) {
             snprintf(out_cgroup_path, cgroup_path_size, "%s", path_buf);
         }
@@ -85,6 +92,7 @@ static void read_state(const char *container_dir, pid_t *out_pid,
     if (out_cgroup_path[0] == '\0') die("state 파일에서 CGROUP_PATH를 찾지 못함");
 
     *out_pid = pid;
+    *out_starttime = starttime;
 }
 
 /* /proc/[pid]/ns/<name> 을 open()해서 fd 반환 */
@@ -150,9 +158,11 @@ int main(int argc, char *argv[]) {
     char **cmd_argv = &argv[2];
 
     pid_t target_pid;
+    unsigned long long starttime;
     char cgroup_path[PATH_MAX];
-    read_state(container_dir, &target_pid, cgroup_path, sizeof(cgroup_path));
-    printf("[*] target PID = %d, CGROUP_PATH = %s\n", target_pid, cgroup_path);
+    read_state(container_dir, &target_pid, &starttime, cgroup_path, sizeof(cgroup_path));
+    printf("[*] target PID = %d, STARTTIME = %llu, CGROUP_PATH = %s\n",
+           target_pid, starttime, cgroup_path);
 
     /* ---------- 1단계: 필요한 namespace fd를 미리 다 열어둔다 ---------- */
     /*
@@ -164,6 +174,21 @@ int main(int argc, char *argv[]) {
     int fd_mnt = open_ns_fd(target_pid, "mnt");
     int fd_net = open_ns_fd(target_pid, "net");
     int fd_uts = open_ns_fd(target_pid, "uts");
+
+    /*
+     * PID 재사용 검증 (mycontainer_state.h 참고): fd를 다 연 "다음에" 검증한다.
+     * ns fd는 연 시점의 namespace를 붙잡고 있으므로, 이 검증을 통과하면
+     * 위 fd들이 확실히 컨테이너 프로세스의 namespace다. (검증을 먼저 하면
+     * 그 사이 PID가 재사용돼서 엉뚱한 프로세스의 namespace를 열 틈이 생긴다)
+     * 이걸 안 하면 유령 state 파일로 exec했을 때, PID를 새로 받은 상관없는
+     * 호스트 프로세스의 namespace로 들어가게 된다.
+     */
+    if (!is_same_process(target_pid, starttime)) {
+        fprintf(stderr, "[!] PID %d는 이 컨테이너 프로세스가 아님 (%s)\n", target_pid,
+                starttime == 0 ? "state에 STARTTIME 없음: 옛 형식이라 검증 불가"
+                               : "종료됐거나 PID가 다른 프로세스에 재사용됨");
+        return 1;
+    }
 
     /*
      * cgroup.procs도 마찬가지 이유로 fork/setns(MNT) 전에 미리 열어둔다.

@@ -38,6 +38,7 @@
 #include <limits.h>
 #include <sched.h>
 #include <fcntl.h>
+#include "mycontainer_state.h"
 
 #define STACK_SIZE (1024 * 1024)
 
@@ -89,8 +90,13 @@ static void set_netns(const char *netns_name) {
  *
  * 형식이 mycontainer_exec.c의 read_target_pid()가 기대하는 "PID=<숫자>"
  * 줄과 일치해야 한다.
+ *
+ * STARTTIME: PID 재사용 판별용 (mycontainer_state.h 참고). execve로
+ * 프로그램이 바뀌어도(phase2 재실행, 최종 execvp) starttime은 그대로라서
+ * clone 직후 한 번만 읽으면 된다.
  */
 static void write_state_file(const char *container_dir, pid_t pid,
+                              unsigned long long starttime,
                               const char *cgroup_path, const char *netns_name,
                               const char *mergeddir) {
     char state_path[PATH_MAX];
@@ -100,6 +106,7 @@ static void write_state_file(const char *container_dir, pid_t pid,
     if (!f) die("state 파일 생성 실패");
 
     fprintf(f, "PID=%d\n", pid);
+    fprintf(f, "STARTTIME=%llu\n", starttime);
     fprintf(f, "CGROUP_PATH=%s\n", cgroup_path);
     fprintf(f, "NETNS_NAME=%s\n", netns_name);
     fprintf(f, "MERGEDDIR=%s\n", mergeddir);
@@ -488,8 +495,15 @@ int main(int argc, char *argv[]) {
      * 컨테이너가 끝날 때까지 여기서 대기하므로, 그 "대기 중"에 다른
      * 터미널의 exec/ps가 이 파일을 읽어서 컨테이너를 찾아야 하기 때문.
      */
-    write_state_file(container_dir, child_pid, cgroup_path, netns_name, mergeddir);
-    printf("[*] state 파일 기록 완료: %s/state (PID=%d)\n", container_dir, child_pid);
+    unsigned long long child_starttime = read_proc_starttime(child_pid);
+    if (child_starttime == 0) {
+        fprintf(stderr, "[!] 자식 starttime 읽기 실패 - ps/stop/exec가 이 컨테이너를 "
+                        "종료된 것으로 취급함\n");
+    }
+    write_state_file(container_dir, child_pid, child_starttime,
+                     cgroup_path, netns_name, mergeddir);
+    printf("[*] state 파일 기록 완료: %s/state (PID=%d, STARTTIME=%llu)\n",
+           container_dir, child_pid, child_starttime);
 
     /* ---------- 자식 종료까지 대기 ---------- */
     int status;

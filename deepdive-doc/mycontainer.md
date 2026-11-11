@@ -100,6 +100,50 @@ Docker는 `docker CLI → dockerd → containerd → runc`로 나뉘어 있다.
 - `docker run busybox sh` + `docker stop` → 10초 걸릴 것으로 예상
 - `docker run --init ...` (tini가 PID 1) → 바로 종료될 것으로 예상
 
+### 2-3-1. 컨테이너 PID 1의 두 시점과 고아 처리 (개념 정리, 실측 🔶)
+
+**같은 프로세스를 두 시점에서 보는 것**
+```
+호스트 시점                                    컨테이너 시점
+systemd                     PID 1
+ └─ mycontainer_run  PID 1538300
+     └─ ash          PID 1538391   ═══  ash  PID 1  (PPid: 0)
+         └─ ls       PID 1538402   ═══   └─ ls  PID 2
+```
+- PID 번호는 namespace마다 따로 매겨진다. 부모-자식 관계는 커널이 namespace와 상관없이 하나로 관리한다.
+- 컨테이너 init의 진짜 부모는 `mycontainer_run`이다. 컨테이너 안에서 `getppid()`가 0인 건 부모가 바깥 ns에 있어서 안 보이기 때문이다.
+- 그래서 **부모-자식 관계와 고아 여부는 호스트 시점으로 봐야 한다.** 컨테이너 안에서는 "최상위"처럼 보여도 호스트에서는 고아가 될 수 있다.
+- `clone()` 한 번에 프로세스 하나가 생기고, 그게 새 PID ns의 PID 1이다. `/proc/self/exe` 재실행이나 execvp는 같은 프로세스가 프로그램만 바꾸는 것이다.
+
+**고아 입양 규칙** (커널 reparenting)
+1. 죽은 부모의 조상 중에 subreaper(`PR_SET_CHILD_SUBREAPER`)가 있으면 그 프로세스에게 입양된다.
+2. 없으면 **죽은 부모가 속한 PID ns의 init**에게 입양된다.
+- `mycontainer_run`(호스트 ns)이 죽으면 컨테이너 init은 systemd에게 입양된다. systemd는 입양한 자식이 끝나면 `wait()`로 바로 거두므로 좀비로 남지 않는다.
+
+**거두는 역할은 두 층에 있다**
+
+| 층 | 고아를 거두는 프로세스 |
+|---|---|
+| 호스트 | systemd |
+| 컨테이너 | 컨테이너의 PID 1 (지금은 ash) |
+| Docker ⬜ | containerd-shim이 subreaper로 컨테이너 init을 입양 |
+
+- 컨테이너 PID 1이 init용 프로그램이 아니면 입양한 자식을 `wait()`하지 않을 수 있다. 그러면 컨테이너 안에 좀비가 쌓인다. 이게 §2-3의 SIGTERM 무시와 함께 Docker `--init`(tini)이 있는 두 번째 이유다.
+
+**확인 방법** (지금 구조는 `/proc`이 호스트 것이라 컨테이너 안에서 두 시점을 동시에 볼 수 있다)
+```sh
+# 컨테이너 안
+echo $$                                          # 1 (getpid: 컨테이너 시점)
+grep -E '^(Pid|PPid|NSpid)' /proc/self/status    # Pid/PPid = 호스트 시점, NSpid = "호스트PID 1"
+```
+```bash
+# 호스트: 고아 만들기
+ps -o pid,ppid,comm -p <ash 호스트 PID>   # PPID = mycontainer_run
+sudo kill <mycontainer_run PID>
+ps -o pid,ppid,comm -p <ash 호스트 PID>   # PPID = 1 (systemd)
+sudo ./mycontainer_ps                     # 고아 컨테이너가 running으로 나와야 함 (§4-1 수정 검증)
+```
+
 ### 2-4. exec는 init보다 권한이 크다 ✅
 
 `mycontainer_exec`는 pid, mnt, net, uts ns와 cgroup에는 들어가지만 **user ns에는 들어가지 않는다** (코드 주석에 "의도적 생략"으로 기록됨).
@@ -113,6 +157,7 @@ Docker는 `docker CLI → dockerd → containerd → runc`로 나뉘어 있다.
 
 - 결과적으로 exec로 들어간 프로세스가 컨테이너 init보다 **권한이 크다.**
 - Docker ⬜: `docker exec`는 원래 프로세스와 같은 조건(같은 user ns, capability, seccomp)으로 들어간다.
+- 수정 여부: **미정**. 지금은 비교 기록으로만 남겨둔다. 고친다면 `setns(CLONE_NEWUSER)` 후 `setgid(0)`/`setuid(0)` 처리가 필요하다.
 
 ---
 
@@ -146,11 +191,66 @@ sudo unshare -Urmpf --propagation private sh -c 'umount -l /proc && mount -t pro
 
 ## 4. 발견된 버그
 
-### 4-1. ps 유령 + PID 재사용 위험 ✅ (미수정)
+### 4-1. ps 유령 + PID 재사용 위험 ✅ (수정함, 2026-11-11, 실제 컨테이너로 검증함)
 - 2026-11-10 기준: 컨테이너 디렉토리 1,841개 중 **state 파일이 748개 남아 있었고, 그중 PID가 살아 있는 것은 0개.** `mycontainer_ps`가 748개 전부 running으로 표시했다.
-- 원인 🔶: `mycontainer_run`이 Ctrl+C(SIGINT)로 죽으면 `waitpid` 뒤에 있는 `remove_state_file()`까지 가지 못한다.
-- **위험**: 죽은 컨테이너의 PID는 다른 프로세스에 다시 배정될 수 있다. 이때 `mycontainer_stop`을 쓰면 상관없는 호스트 프로세스에 SIGTERM이나 SIGKILL을 보낼 수 있다.
-- 수정 방향: state 파일에 `starttime`(`/proc/<pid>/stat`의 22번째 필드)을 같이 기록하고, PID와 starttime이 둘 다 맞을 때만 살아 있는 걸로 판단한다. `kill(pid, 0)`만으로는 부족하다.
+- 원인 🔶: `mycontainer_run`이 신호(SIGINT, SIGHUP, kill 등)로 먼저 죽으면 `waitpid` 뒤에 있는 `remove_state_file()`까지 가지 못한다. 컨테이너 안에서 `exit`하거나 `mycontainer_stop`으로 끝내는 정상 경로에서는 run이 살아 있으니 유령이 생기지 않는다. (원인 자체는 아직 고치지 않음. 아래 수정으로 유령이 남아도 해가 없게 만듦)
+- 단서 ✅:
+  - 748개 모두 마지막 부팅(2026-10-05) **이후**에 생겼다. 그러니 재부팅은 원인이 아니다.
+  - 생성 시각이 몰려 있다. 1분에 70개 넘게 생긴 구간이 여러 번 있다(10/25 14:31, 10/26 06:54~55, 07:29~30). 날짜로는 10/23~10/26에 668개가 몰려 있다.
+  - 이 패턴은 스크립트로 반복 실행하다가 run이 계속 죽은 것으로 보인다. 사용자 기억으로는 eBPF 실험 중 스크립트로 반복 실행했다.
+  - 2026-11-11 기준 남은 cgroup, netns, 호스트 veth, 좀비 프로세스는 **모두 0개**다. 남은 건 state 파일뿐이다.
+  - 해석: `run_container.sh`는 살아서 `|| true` 다음의 정리 단계까지 실행했다. cgroup `rmdir`이 성공했다는 건 그 시점에 컨테이너 프로세스도 끝나 있었다는 뜻이다. 즉 **스크립트는 살고, run만 죽은** 경우다. 스크립트 전체를 죽였다면(`timeout`이나 Ctrl+C) cgroup이 남았을 것이다.
+  - 원인 후보 🔶: ① 출력을 `| head` 같은 파이프로 넘겨서 run이 state 기록 직후 `printf`에서 SIGPIPE로 죽음, ② `pkill`로 run만 종료. 반복 실행하던 스크립트를 보면 판별할 수 있다.
+- 유령 ≠ 좀비 ✅:
+  - 좀비는 부모가 살아 있는데 `wait()`를 안 해서 프로세스 테이블에 항목이 남은 것이다.
+  - run이 죽으면 컨테이너 init은 고아가 되어 systemd(호스트 PID 1)에게 입양된다. 입양된 뒤 끝나면 systemd가 바로 거두므로 좀비로 남지 않는다. 남는 건 디스크의 state 파일뿐이다.
+  - 입양된 뒤에도 컨테이너 init이 계속 실행 중이면 "고아 컨테이너"다. 이 경우 (PID, starttime)이 맞으므로 새 ps는 running으로 정상 표시하고, stop으로 끌 수 있다.
+- 질문을 나누면 이렇다:
+  - "고아가 남았나?" → **프로세스**에 대한 질문: run이 죽은 뒤에도 컨테이너가 살아 있나. 자원과 보안 측면, 아무도 정리하지 않음.
+  - "유령이 남았나?" → **기록**에 대한 질문: state 파일이 실제와 맞나. 도구가 올바르게 동작하느냐의 문제. 이번에 고친 건 이쪽이다.
+  - 이번 748개는 유령이다. 고아였던 적이 있는지는 지금 알 수 없다(정리 시점에는 이미 끝나 있었음).
+- Docker 대조 ⬜ (관리 프로세스가 죽었을 때 컨테이너는 어떻게 되나):
+  - Docker 구조는 `dockerd → containerd → containerd-shim → 컨테이너 init`이다. runc는 컨테이너를 만들고 바로 종료하고, **shim**이 부모로 남는다. shim은 `PR_SET_CHILD_SUBREAPER`로 고아도 입양한다.
+  - dockerd나 containerd가 재시작해도 컨테이너는 고아가 되지 않는다. 재시작한 데몬이 shim에 다시 붙는다(`live-restore`).
+  - 내 구조에서 shim 역할은 `mycontainer_run`(clone 후 `waitpid`)이 한다. 하지만 run이 죽으면 대신할 게 없어서 컨테이너가 systemd에 입양된다.
+  - 실험 아이디어: 컨테이너를 띄운 뒤 `mycontainer_run`만 `kill` → 컨테이너가 고아로 계속 도는지, 새 ps에 나오는지, stop으로 끌 수 있는지 확인. Docker에서는 `containerd`를 재시작했을 때 컨테이너가 유지되는지와 비교.
+- "해가 없게"의 의미: 유령은 여전히 생기고 남는다. 하지만 ps, stop, exec가 그걸 믿고 행동하지 않는다. `kill -9`이나 OOM으로 run이 죽으면 어떤 정리 코드도 실행될 수 없으므로, 원인을 고쳐도 이 방어는 필요하다.
+- **위험**: 죽은 컨테이너의 PID는 다른 프로세스에 다시 배정될 수 있다. 이때 `mycontainer_stop`을 쓰면 상관없는 호스트 프로세스에 SIGTERM이나 SIGKILL을 보낼 수 있다. `exec`도 그 프로세스의 namespace로 들어가게 된다.
+- **왜 `kill(pid, 0)`으로는 부족한가**: "그 PID에 누군가 있다"만 알려줄 뿐 "같은 프로세스인지"는 모른다. 게다가 좀비 상태에도 성공을 돌려준다.
+
+**수정 내용**
+- 프로세스를 **(PID, starttime) 쌍**으로 식별한다. starttime은 `/proc/<pid>/stat`의 22번째 필드다. 공통 코드는 `src/mycontainer_state.h`에 있다.
+  - run: clone 직후 자식의 starttime을 `STARTTIME=`으로 state 파일에 기록한다. execve를 거쳐도 starttime은 바뀌지 않는다.
+  - ps: PID와 starttime이 둘 다 맞을 때만 표시하고, 걸러낸 유령은 개수만 출력한다.
+  - stop: `pidfd_open` → 검증 → `pidfd_send_signal` 순서. 종료 대기는 `poll(pidfd)`로 한다.
+  - exec: ns fd를 모두 연 **다음에** 검증한다.
+  - STARTTIME이 없는 옛 state 파일은 검증할 수 없으므로 "죽은 것"으로 취급한다.
+- **"먼저 열고, 그다음 검증"하는 순서가 핵심이다.** pidfd와 ns fd는 연 시점의 대상을 붙잡고 있으므로, 연 다음에 검증을 통과하면 그 fd가 가리키는 게 확실히 컨테이너 프로세스다. 검증을 먼저 하면 검증과 열기 사이에 PID가 바뀔 틈이 생긴다.
+- `/proc/<pid>/stat` 파싱 함정: 2번째 필드(comm)에 공백이나 `)`가 들어갈 수 있다. 그래서 마지막 `)` 뒤부터 세어야 한다. 이름을 `a) b c 1 2 3`으로 바꾼 프로세스로 실험했을 때 단순하게 `awk '{print $22}'`로 세면 `0`이 나왔다.
+
+**검증 (sudo 없이, 가짜 state 파일 + 직접 띄운 테스트 프로세스)** ✅
+
+| 시나리오 | 결과 |
+|---|---|
+| ps, 실제 데이터 | 유령 748개 전부 걸러짐, running 0개 |
+| stop, 죽은 PID | `pidfd_open` ESRCH → "유령"으로 안내, exit 1 |
+| stop, PID 재사용 (살아 있는 다른 프로세스, STARTTIME 불일치) | 신호 안 보냄, 대상 프로세스 생존 |
+| stop, 옛 형식 (STARTTIME 없음) | 신호 안 보냄 |
+| stop, 정상 | SIGTERM → 즉시 종료 확인 |
+| stop, SIGTERM 무시 | 10초 → SIGKILL → 종료 확인. 부모가 아직 거두지 않은 **좀비 상태도 `poll(pidfd)`가 종료로 인식** |
+| exec, STARTTIME 불일치 | setns 전에 거부 |
+| exec, 일치 | 검증 통과 → `setns(PID)`까지 진행 (sudo가 아니라 거기서 EPERM, 예상대로) |
+
+**검증 (sudo, 실제 컨테이너로 한 바퀴, 2026-11-11)** ✅
+
+| 단계 | 결과 |
+|---|---|
+| `ps` (실행 중) | 살아 있는 컨테이너 1개만 표시 (PID 1548466), 유령 748개는 숨기고 안내 |
+| `exec ... /bin/sh` | state의 STARTTIME 검증 통과 → setns(PID/NET/MNT/UTS), cgroup 가입 → ash 진입 |
+| `stop` | SIGTERM → 10초 타임아웃 → SIGKILL → 종료 확인 (§2-3의 PID 1 규칙과 같음) |
+| `ps` (종료 후) | 목록 비어 있음, 유령 수는 748개 그대로 (정상 종료라서 새 유령이 생기지 않음) |
+
+- 덤: `exec`에 없는 경로(`/bin/s`)를 주면 setns와 cgroup 가입은 끝난 뒤 `execvp`에서 ENOENT로 실패한다. 경로는 컨테이너 mnt ns 기준으로 해석되므로 exec 직전까지 가야 실패를 알 수 있다.
 
 ### 4-2. 컨테이너 디렉토리가 쌓임 ✅ (미수정)
 - upper/work/merged를 지우는 코드가 없다. 위 시점 기준 416MB.
@@ -197,7 +297,10 @@ Docker 쪽 PID는 `docker inspect -f '{{.State.Pid}}' <id>`, 내 컨테이너는
 ---
 
 ## 7. 다음 할 일
-- [ ] §4-1 ps 유령과 PID 재사용 수정
+- [x] §4-1 ps 유령과 PID 재사용 수정 (실제 컨테이너로 ps/exec/stop 확인함)
+- [ ] §4-1 원인 수정: `mycontainer_run`이 SIGINT로 죽어도 state를 정리하게 하기
+- [ ] 남아 있는 유령 state 파일과 디렉토리 정리 (§4-2, 지우기 전에 확인 필요)
+- [ ] §2-3-1 두 시점 확인 (`NSpid`) + 고아 만들기 실험 (`mycontainer_run`만 kill)
 - [ ] §3 procfs A/B 실험
 - [ ] Docker 대조 실험: §2-2 ping, §2-3 stop/`--init`, §6 공통 측정
 - [ ] Docker 컨테이너에 eBPF 관측기 붙여보기
