@@ -161,31 +161,61 @@ sudo ./mycontainer_ps                     # 고아 컨테이너가 running으로
 
 ---
 
-## 3. 가설: procfs "Mount too revealing" 🔶
+## 3. procfs "Mount too revealing": 원인은 마운트 순서 ✅ (2026-11-11 실험으로 확정)
 
-**현상**: 새 procfs를 마운트하면 `VFS: Mount too revealing`으로 거부된다. 지금은 호스트 `/proc`을 bind mount해서 우회하고 있다(4.5단계). 그래서 컨테이너 안 `ps`에 호스트 프로세스가 보인다.
+**현상**: 새 procfs를 마운트하면 `VFS: Mount too revealing`으로 거부됐다. 그래서 한동안 호스트 `/proc`을 bind mount해서 우회했고, 컨테이너 안 `ps`에 호스트 프로세스가 보였다.
 
-**코드 주석에 적힌 원인**: overlay 마운트 자체 → 🔶 **아닐 가능성이 높음**
+**수정 (2026-11-13)**: 4.5단계(pivot_root 전)의 호스트 `/proc` bind를 새 procfs 마운트로 바꿨다 (`mycontainer_run.c` 4.5단계, `mount("proc", merged/proc, "proc", MS_NOSUID|MS_NODEV|MS_NOEXEC, NULL)`). 틀린 원인 설명이 남아 있던 3단계·4.5단계 주석도 고쳤다. **실제 컨테이너로 검증함** ✅ (아래 "검증 결과").
 
-**확인한 것**
-- 호스트 `/proc` 아래에 `/proc/sys/fs/binfmt_misc` (autofs + binfmt_misc) 하위 마운트가 있다. 하지만 커널이 이 경로를 "항상 빈 디렉토리"로 등록하므로 원인일 가능성은 낮다.
-
-**유력한 가설: 마운트하는 순서**
-- 커널 조건(`mount_too_revealing` → `mnt_already_visible`): **지금 이 mount ns 안에** 가려진 곳 없이 전부 보이는 proc 마운트가 이미 있어야 한다.
+**결론** ✅
+- 원인은 **overlay나 self bind가 아니라 마운트하는 순서**다. 커밋 `fa28978`과 당시 `mycontainer_run.c` 주석(3단계, 4.5단계)에 적힌 "overlay가 원인"이라는 설명은 **틀렸다** (아래 D, G로 두 번 반증). 주석은 2026-11-13에 고쳤다.
+- 커널 조건(`mount_too_revealing` → `mnt_already_visible`): user ns 안에서 새 procfs를 마운트하려면, **지금 이 mount ns 안에** 가려진 곳 없이 전부 보이는 proc 마운트가 이미 있어야 한다. ⚠️ 이 설명은 함수 이름과 실험 결과에 근거한다. **`fs/namespace.c` 원문과 줄 단위로 대조하지는 못했다** ⬜ (로컬에는 커널 헤더만 있고, 2026-11-13에 GitHub raw는 429, git.kernel.org는 403으로 받지 못했다).
+- **runc와 대조** ✅ (2026-11-13, `opencontainers/runc` main의 `libcontainer/rootfs_linux.go`): `prepareRootfs()`는 rootfs를 self bind한 뒤 `for _, m := range config.Mounts { setupAndMountToRootfs(...) }`로 proc를 포함한 모든 마운트를 rootfs 아래에 먼저 건다. 마지막에 `pivotRoot(rootFd)`(`NoPivotRoot`이면 `msMoveRoot`, mount ns가 없으면 `chroot`)를 호출한다. proc는 `mountToRootfs`의 `case "proc", "sysfs":` 분기에서 `checkProcMount`를 거쳐 새로 마운트된다. 즉 runc는 처음부터 F 순서다. 호스트 `/proc`가 아직 mount ns에 보이는 동안 새 procfs를 마운트하므로 이 문제를 겪지 않는다.
 - 원래 코드는 7단계(`umount2("/.old_root", MNT_DETACH)`)에서 호스트 `/proc`까지 같이 떼어낸 **뒤에**, 9단계에서 새 procfs를 마운트했다. 그 시점에 ns 안에 proc 마운트가 없으니 거부된다.
-- self bind(3단계)를 지워도 결과가 같았던 것도 이걸로 설명된다.
-- 4.5단계 bind mount가 동작하는 것도 같은 이유다. 호스트 `/proc`이 아직 보일 때 실행되니까.
+- 4.5단계 bind mount가 동작하는 것도 같은 이유다. 호스트 `/proc`이 아직 보일 때 실행되기 때문이다.
+- 호스트 `/proc` 아래 `binfmt_misc` 하위 마운트는 원인이 아니다 (A, D, F가 이 하위 마운트가 있는 상태에서 성공).
 
-**검증 방법** (sudo 필요)
+**실험 1: unshare 단독** (`unshare -Urmpf --propagation private`, sudo)
+
+| 케이스 | 조건 | 결과 |
+|---|---|---|
+| A | user ns 있음, `/proc` 보이는 상태에서 새 procfs | ✅ 성공, PID 디렉토리 4개 (새 PID ns) |
+| B | user ns 있음, `umount -l /proc` 후 새 procfs | ⚠️ **무효**: `umount: /proc: not mounted` (umount 단계에서 실패) |
+| C | user ns 없음, `umount -l /proc` 후 새 procfs | ✅ 성공 → 가시성 검사는 **user ns 안에서만** 걸린다 |
+| D | user ns 있음, overlay + self bind 후 `/proc` 보이는 상태 | ✅ 성공, dmesg 경고 없음 → **overlay와 self bind는 원인이 아니다** |
+
+- **B가 무효인 이유**: 덜 특권적인 user ns가 소유한 mount ns로 복사된 마운트는 잠긴다(locked). 잠긴 `/proc`는 하나만 떼어낼 수 없다(EINVAL → util-linux가 "not mounted"로 표시). 그래서 예전에 이 문서에 적어둔 B 명령으로는 순서 가설을 검증할 수 없었다. mycontainer는 옛 root를 **통째로** 떼어내므로 잠긴 하위 마운트까지 함께 떨어진다. 그래서 실험 2에서 pivot_root까지 재현했다.
+
+**실험 2: mycontainer 순서 재현** (`experiments/procfs/procfs_order.c`, 로그 `experiments/procfs/logs/20261112-004932/procfs_order.log`. `mycontainer_run.c`(HEAD `cef41b5`) 경로를 그대로 따름: uid_map/gid_map `0 → 1000`, `setgroups=deny`, setgid(0)/setuid(0) 후 re-exec, `CapEff=000001ffffffffff`, busybox_rootfs, pivot_root → `umount2(MNT_DETACH)`)
+
+| 케이스 | 순서 | 결과 | dmesg |
+|---|---|---|---|
+| E | overlay → self bind → pivot_root → 옛 root 떼어냄 → **그 뒤에** 새 procfs (원래 코드) | ❌ `Operation not permitted (errno=1)` | "Mount too revealing" +1 |
+| G | E와 같은 순서, overlay 대신 bind | ❌ 같은 실패 | +1 |
+| F | overlay → self bind → **pivot_root 전에** `merged/proc`에 새 procfs → pivot_root → 옛 root 떼어냄 | ✅ 성공, PID 디렉토리 **1개** (`NSpid: 1`) | 0 |
+| H | 호스트 `/proc`를 rbind (예전 우회) | ✅ 성공, PID 디렉토리 **180개** (`NSpid: 1677718 1`) | 0 |
+
+- **F를 `mycontainer_run.c`에 적용했다** (2026-11-13). 새 procfs 인스턴스라서 컨테이너 PID만 보인다 (1개 vs 180개). F가 1개인 이유: 재현 프로그램은 PID 1 자신이 직접 개수를 센다. 실제 컨테이너라면 셸과 `ps` 정도가 보일 것이다.
+- 수치 정정 (2026-11-13): 이 표에는 예전에 "F 4개 / H 163개"라고 적혀 있었다. 그 수치는 그전에 `unshare` 셸 스크립트(`-S 0 -G 0`, setgroups deny 없음)로 돌린 결과이고, 로그는 저장하지 않았다. 지금 남아 있는 로그는 위 C 재현 프로그램의 것뿐이라서 로그 기준으로 바꿨다. 성공과 실패 패턴은 두 실행에서 같다.
+
+**검증 결과 (2026-11-13, 실제 컨테이너)** ✅
 ```bash
-mkdir -p /tmp/p
-# A: /proc가 보이는 상태 → 성공해야 함
-sudo unshare -Urmpf --propagation private sh -c 'mount -t proc proc /tmp/p && echo 성공 && ls /tmp/p | grep -E "^[0-9]+$"'
-# B: /proc를 먼저 떼어낸 상태 → EPERM, dmesg에 "Mount too revealing"이 찍혀야 함
-sudo unshare -Urmpf --propagation private sh -c 'umount -l /proc && mount -t proc proc /tmp/p && echo 성공'
+cd ~/practice/mycontainer/src
+sudo ./run_container.sh -- /bin/sh -c 'ls /proc | grep -cE "^[0-9]+$"; ps'
+sudo dmesg | grep "Mount too revealing" | tail -1
 ```
+- 1~10단계를 모두 통과했다. 4.5단계 로그는 `새 procfs -> .../merged/proc 마운트 (pivot_root 전)`.
+- `/proc`의 PID 디렉토리는 **3개**였다. 세는 순간 살아 있던 sh(PID 1), ls, grep이다. 예전 우회(H)에서는 180개였다.
+- `ps` 출력은 `1 0 {ps} /bin/sh -c ...` 한 줄이다. sh가 마지막 명령을 exec해서 ps가 PID 1이 됐다.
+- dmesg의 마지막 "Mount too revealing"은 그대로 `[3123016.126547]`이다(11-12 실험 G에서 찍힌 줄). 새로 찍힌 경고는 없다.
+- 주의: `sudo` 없이 `./run_container.sh`로 실행하면 `mycontainer_run`이 일반 사용자로 돈다(스크립트 101줄에만 sudo가 없다). 그러면 `cgroup.procs` 열기와 `setns(NET)`가 EPERM으로 실패해서 clone 전에 멈춘다. 2026-11-13에 실제로 겪었다.
 
-**관찰 포인트**: PID 격리는 "PID ns"와 "procfs 인스턴스" 두 겹이다. 지금 내 컨테이너는 PID ns는 분리되어 있지만 procfs는 호스트 것을 쓴다. eBPF의 `container_pid`나 `/proc/self/status`의 `NSpid`로 보면 PID ns 분리는 확인된다.
+**덤: 실험 스크립트를 만들다가 겪은 user ns 함정 2개** ✅
+1. `unshare -r`(ns 0 → 호스트 0)로는 `/home/dev`(750, dev 소유)에 있는 busybox_rootfs에 들어가지 못했다(overlay, bind 둘 다 실패). user ns 안 root의 `CAP_DAC_OVERRIDE`는 **inode 소유자 uid가 그 ns에 매핑돼 있을 때만** 효력이 있다. dev(1000)는 매핑에 없으니 "기타 사용자" 권한으로 검사된다. §2-2 ping과 같은 원리다(capability는 어느 user ns 소속 자원에 대해서인가까지 포함). mycontainer는 `0 1000 1`로 매핑하므로 문제가 없었다.
+2. `unshare --map-groups=... --setgroups=deny` → `write failed /proc/self/setgroups: Operation not permitted`. `setgroups`는 **gid_map을 쓰기 전에만** 바꿀 수 있다. unshare가 gid_map을 먼저 써버렸기 때문이다. `mycontainer_run.c`가 `deny_setgroups()`를 `write_id_map()`보다 먼저 호출하는 이유다.
+- 참고: util-linux `--map-user=1000`은 "ns 안 1000 = 현재 사용자"라는 뜻이라 방향이 반대다. "ns 0 = 호스트 1000"은 `--map-users=0:1000:1`이다.
+
+**관찰 포인트**: PID 격리는 "PID ns"와 "procfs 인스턴스" 두 겹이다. 예전 우회(H)는 PID ns는 분리했지만 procfs는 호스트 것을 썼다(H의 180개). 2026-11-13 수정으로 두 겹 모두 분리됐다(실제 컨테이너에서 PID 3개 확인 ✅). eBPF의 `container_pid`나 `/proc/self/status`의 `NSpid`로 보면 PID ns 분리는 확인된다.
 
 ---
 
@@ -277,7 +307,7 @@ sudo unshare -Urmpf --propagation private sh -c 'umount -l /proc && mount -t pro
 | user ns | 사용 (ns 0 → 1000) | 사용 안 함 (`userns-remap`은 옵트인) |
 | IPC ns | 없음 | 있음 |
 | cgroup ns | 없음 | 있음 (cgroup v2) |
-| procfs | 호스트 `/proc` bind | 새 인스턴스 + masked paths (`/proc/kcore` 등) |
+| procfs | 새 인스턴스 (pivot_root 전에 마운트, 2026-11-13~). masked paths 없음 | 새 인스턴스 + masked paths (`/proc/kcore` 등) |
 | capability | user ns 안에서 전부 | 14개 정도의 기본 목록 |
 | seccomp | 없음 | 기본 프로파일 |
 | `/sys` | (확인 필요) | 읽기 전용 |
@@ -301,6 +331,9 @@ Docker 쪽 PID는 `docker inspect -f '{{.State.Pid}}' <id>`, 내 컨테이너는
 - [ ] §4-1 원인 수정: `mycontainer_run`이 SIGINT로 죽어도 state를 정리하게 하기
 - [ ] 남아 있는 유령 state 파일과 디렉토리 정리 (§4-2, 지우기 전에 확인 필요)
 - [ ] §2-3-1 두 시점 확인 (`NSpid`) + 고아 만들기 실험 (`mycontainer_run`만 kill)
-- [ ] §3 procfs A/B 실험
+- [x] §3 procfs A/B 실험 (2026-11-11, 원인 = 마운트 순서로 확정)
+- [x] §3 수정 F(pivot_root 전에 새 procfs 마운트)를 `mycontainer_run.c`에 적용 (2026-11-13, 컴파일 확인)
+- [x] §3 수정 후 실제 컨테이너로 검증 (2026-11-13, PID 3개, dmesg 새 경고 없음)
+- [ ] §3 `fs/namespace.c`의 `mnt_already_visible` 원문과 대조
 - [ ] Docker 대조 실험: §2-2 ping, §2-3 stop/`--init`, §6 공통 측정
 - [ ] Docker 컨테이너에 eBPF 관측기 붙여보기

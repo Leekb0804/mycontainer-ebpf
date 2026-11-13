@@ -216,11 +216,10 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
 
     /* ---------- 3단계: mergeddir을 마운트 포인트로 승격 (self bind mount) ---------- */
     /*
-     * 실험: 이 단계가 procfs "Mount too revealing" 문제의 원인인지
-     * 확인하려고 제거해봤으나, 제거해도 동일하게 실패했다. 즉 원인이
-     * 아니었음이 확인됨 - overlay 마운트(2단계) 자체가 원인일 가능성이
-     * 높다. self bind mount는 원래 목적(pivot_root가 요구하는 마운트
-     * 포인트 승격)대로 유지한다.
+     * 참고: 예전에는 이 단계나 overlay(2단계)가 procfs "Mount too revealing"의
+     * 원인이라고 봤지만, 2026-11-11~12 실험(experiments/procfs, 케이스 D/G)으로
+     * 둘 다 원인이 아님을 확인했다. 원인은 procfs를 마운트하는 "순서"였다
+     * (4.5단계 주석 참고).
      */
     printf("[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인\n");
     if (mount(mergeddir, mergeddir, NULL, MS_BIND | MS_REC, NULL) != 0) {
@@ -235,32 +234,30 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
         die("put_old mkdir 실패");
     }
 
-    /* ---------- 4.5단계: 호스트 /proc를 bind mount (실용적 우회) ---------- */
+    /* ---------- 4.5단계: 새 procfs 인스턴스 마운트 (pivot_root 전에) ---------- */
     /*
-     * 새 procfs 인스턴스를 mount()로 마운트하려는 시도는 계속
-     * "VFS: Mount too revealing"으로 거부됐다. self bind mount(3단계)를
-     * 제거하는 실험도 해봤지만 동일하게 실패해서, 원인이 3단계가 아니라
-     * overlay 마운트(2단계) 자체와 얽혀 있다는 게 확인됐다 - overlay를
-     * 없앨 수는 없으니(컨테이너의 핵심 기능), 정확한 근본 수정보다
-     * 실제 컨테이너 런타임(gVisor 등)이 쓰는 정석적인 우회를 택한다:
-     * 새 procfs 인스턴스를 만들지 않고, 이미 있는(호스트) procfs를
-     * bind mount로 재사용한다. bind mount는 새 인스턴스가 아니라 기존
-     * 마운트에 대한 또 다른 진입점일 뿐이라 이 가시성 체크를 안 거친다.
-     * 반드시 pivot_root(5단계) 이전에 해야 한다 - pivot_root 이후에는
-     * 호스트의 /proc 자체가 옛 root와 함께 분리되어 더 이상 접근할
-     * 수 없다.
+     * 커널은 user ns 안에서 새 procfs를 마운트할 때 mount_too_revealing() ->
+     * mnt_already_visible()로 검사한다: "지금 이 mount ns 안에 가려지지 않은
+     * proc 마운트가 이미 있는가". 없으면 "VFS: Mount too revealing"(EPERM).
      *
-     * 트레이드오프: 이러면 컨테이너 안에서 /proc를 보면 host의 PID들이
-     * 그대로 보인다 - CLONE_NEWPID로 얻으려던 PID 격리 효과가 procfs
-     * 상으로는 흐려진다. 지금은 "컨테이너가 끝까지 실행되는지"를
-     * 확인하는 게 우선이라 이 한계는 알고 감수한다.
+     * 예전 코드는 7단계에서 옛 root와 함께 호스트 /proc까지 떼어낸 "뒤에"
+     * 9단계에서 마운트해서 거부됐다. 그래서 한동안 호스트 /proc를 bind mount로
+     * 우회했지만, 그러면 컨테이너 안에서 호스트 PID가 전부 보인다(실험 H: 180개).
+     *
+     * 호스트 /proc가 아직 이 mount ns에 보이는 pivot_root "전에" merged/proc에
+     * 새 인스턴스를 마운트하면 검사를 통과한다(실험 F: PID 1개).
+     * runc도 같은 순서다: prepareRootfs()에서 /proc 등을 rootfs 아래 먼저
+     * 마운트하고, 그다음 pivotRoot()를 호출한다.
+     *
+     * 이 프로세스는 CLONE_NEWPID로 만든 새 PID ns 안에 있으므로, 새 procfs는
+     * 이 PID ns 기준으로 PID를 보여준다.
      */
     char proc_target[PATH_MAX];
     snprintf(proc_target, sizeof(proc_target), "%s/proc", mergeddir);
-    printf("[*] 4.5단계: 호스트 /proc -> %s bind mount (PID 격리 일부 포기)\n",
-           proc_target);
-    if (mount("/proc", proc_target, NULL, MS_BIND | MS_REC, NULL) != 0) {
-        die("proc bind mount 실패");
+    printf("[*] 4.5단계: 새 procfs -> %s 마운트 (pivot_root 전)\n", proc_target);
+    if (mount("proc", proc_target, "proc",
+              MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) {
+        die("procfs 마운트 실패");
     }
 
     /* ---------- 5단계: pivot_root 실행 ---------- */
@@ -286,8 +283,8 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     }
 
     /* ---------- 9단계: procfs ---------- */
-    /* 4.5단계에서 이미 bind mount로 준비됐으므로 여기선 별도 작업 없음 */
-    printf("[*] 9단계: /proc는 4.5단계에서 이미 bind mount로 준비됨 (생략)\n");
+    /* 4.5단계에서 pivot_root 전에 이미 마운트했으므로 여기선 별도 작업 없음 */
+    printf("[*] 9단계: /proc는 4.5단계에서 이미 마운트됨 (생략)\n");
 
     printf("\n[+] 컨테이너 진입 완료. execvp로 넘어갑니다.\n\n");
 
