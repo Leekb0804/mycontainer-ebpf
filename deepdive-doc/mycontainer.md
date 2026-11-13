@@ -169,7 +169,16 @@ sudo ./mycontainer_ps                     # 고아 컨테이너가 running으로
 
 **결론** ✅
 - 원인은 **overlay나 self bind가 아니라 마운트하는 순서**다. 커밋 `fa28978`과 당시 `mycontainer_run.c` 주석(3단계, 4.5단계)에 적힌 "overlay가 원인"이라는 설명은 **틀렸다** (아래 D, G로 두 번 반증). 주석은 2026-11-13에 고쳤다.
-- 커널 조건(`mount_too_revealing` → `mnt_already_visible`): user ns 안에서 새 procfs를 마운트하려면, **지금 이 mount ns 안에** 가려진 곳 없이 전부 보이는 proc 마운트가 이미 있어야 한다. ⚠️ 이 설명은 함수 이름과 실험 결과에 근거한다. **`fs/namespace.c` 원문과 줄 단위로 대조하지는 못했다** ⬜ (로컬에는 커널 헤더만 있고, 2026-11-13에 GitHub raw는 429, git.kernel.org는 403으로 받지 못했다).
+- 커널 조건(`mount_too_revealing` → `mnt_already_visible`): user ns 안에서 새 procfs를 마운트하려면, **지금 이 mount ns 안에** 가려진 곳 없이 전부 보이는 proc 마운트가 이미 있어야 한다.
+- **커널 원문 대조** ✅ (2026-11-13, upstream `v7.0`의 `fs/namespace.c`. 실행 중인 Ubuntu `7.0.0-27`과는 패치 차이가 있을 수 있다)
+  - **한 문장 요약**: 새 procfs 마운트는 `do_new_mount_fc()`에서 `mount_too_revealing()`이 true면 `"Mount too revealing"`을 찍고 `-EPERM`을 돌려준다. 이 함수는 mount ns의 소유 user ns가 init이 아니고 fs가 `SB_I_USERNS_VISIBLE`(procfs는 `fs/proc/root.c:260`에서 설정)일 때 `!mnt_already_visible()`을 돌려준다. 그러므로 **현재 mount ns(`current->nsproxy->mnt_ns`)의 마운트 중에 "같은 fs 타입 + fs 루트를 통째로 마운트 + 잠긴 플래그 조건 통과 + 잠긴 하위 마운트가 영구히 빈 디렉토리만 가림"을 만족하는 것이 하나도 없으면 거부된다.**
+  - 실험과 대응:
+    - E/G: pivot_root 후 옛 root를 떼면 ns의 마운트 목록(`ns->mounts`)에 proc 타입이 하나도 없다. 루프가 `false`를 돌려주고 거부된다.
+    - F: 아직 호스트 `/proc`(fs 루트 그대로)가 ns 안에 있으니 통과한다.
+    - C(user ns 없음): `if (ns->user_ns == &init_user_ns) return false;`로 검사 자체를 건너뛴다.
+    - H(bind): `mount_too_revealing`의 호출 지점은 `do_new_mount_fc()`(`:3774`)와 `fsmount()`(`:4461`) 두 곳뿐이다. bind mount 경로는 이 검사를 거치지 않는다.
+  - 하위 마운트 조건은 `MNT_LOCKED`인 자식이 `is_empty_dir_inode()`가 아닌 곳을 가리면 그 후보를 건너뛰는 것이다. 호스트 `/proc/sys/fs/binfmt_misc`의 autofs/binfmt_misc 하위 마운트가 있어도 A/D/F가 성공했다. 이 실험 결과는 그 마운트 지점이 "영구히 빈 디렉토리"로 취급된다는 것과 맞는다. 다만 해당 sysctl 마운트 지점을 등록하는 코드 위치까지는 확인하지 않았다.
+  - 덤: 통과하면 `*new_mnt_flags |= mnt_flags & (MNT_LOCK_READONLY | MNT_LOCK_ATIME)`로, 기존 proc의 잠긴 읽기 전용/atime 속성이 새 마운트에 그대로 옮겨진다.
 - **runc와 대조** ✅ (2026-11-13, `opencontainers/runc` main의 `libcontainer/rootfs_linux.go`): `prepareRootfs()`는 rootfs를 self bind한 뒤 `for _, m := range config.Mounts { setupAndMountToRootfs(...) }`로 proc를 포함한 모든 마운트를 rootfs 아래에 먼저 건다. 마지막에 `pivotRoot(rootFd)`(`NoPivotRoot`이면 `msMoveRoot`, mount ns가 없으면 `chroot`)를 호출한다. proc는 `mountToRootfs`의 `case "proc", "sysfs":` 분기에서 `checkProcMount`를 거쳐 새로 마운트된다. 즉 runc는 처음부터 F 순서다. 호스트 `/proc`가 아직 mount ns에 보이는 동안 새 procfs를 마운트하므로 이 문제를 겪지 않는다.
 - 원래 코드는 7단계(`umount2("/.old_root", MNT_DETACH)`)에서 호스트 `/proc`까지 같이 떼어낸 **뒤에**, 9단계에서 새 procfs를 마운트했다. 그 시점에 ns 안에 proc 마운트가 없으니 거부된다.
 - 4.5단계 bind mount가 동작하는 것도 같은 이유다. 호스트 `/proc`이 아직 보일 때 실행되기 때문이다.
@@ -334,6 +343,6 @@ Docker 쪽 PID는 `docker inspect -f '{{.State.Pid}}' <id>`, 내 컨테이너는
 - [x] §3 procfs A/B 실험 (2026-11-11, 원인 = 마운트 순서로 확정)
 - [x] §3 수정 F(pivot_root 전에 새 procfs 마운트)를 `mycontainer_run.c`에 적용 (2026-11-13, 컴파일 확인)
 - [x] §3 수정 후 실제 컨테이너로 검증 (2026-11-13, PID 3개, dmesg 새 경고 없음)
-- [ ] §3 `fs/namespace.c`의 `mnt_already_visible` 원문과 대조
+- [x] §3 `fs/namespace.c`의 `mnt_already_visible` 원문과 대조 (2026-11-13, upstream v7.0)
 - [ ] Docker 대조 실험: §2-2 ping, §2-3 stop/`--init`, §6 공통 측정
 - [ ] Docker 컨테이너에 eBPF 관측기 붙여보기
