@@ -1,0 +1,37 @@
+[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출
+[*] uid_map: namespace 0 -> host 1000
+[*] gid_map: namespace 0 -> host 1000
+[*] 0단계: 매핑 완료 신호 대기 중...
+[*] 매핑 완료 확인.
+[*] setgid(0)/setuid(0) 호출 (namespace 관점의 root) - gid_map/uid_map: namespace 0 -> host uid=1000 gid=1000
+[*] setuid(0)/setgid(0) 완료. 재실행합니다.
+[*] state 파일 기록 완료: /var/lib/mycontainer/containers/mc-verify-before-tty/state (PID=2671155, STARTTIME=358165802)
+[*] phase2 진입: getuid=0 geteuid=0
+[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private
+[*] 2단계: overlay 마운트 -o lowerdir=/home/dev/practice/mycontainer/busybox_rootfs,upperdir=/var/lib/mycontainer/containers/mc-verify-before-tty/upper,workdir=/var/lib/mycontainer/containers/mc-verify-before-tty/work
+[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인
+[*] 4단계: put_old 디렉토리 준비 (/var/lib/mycontainer/containers/mc-verify-before-tty/merged/.old_root)
+[*] 4.5단계: 새 procfs -> /var/lib/mycontainer/containers/mc-verify-before-tty/merged/proc 마운트 (pivot_root 전)
+[*] 5단계: pivot_root(merged, put_old) - root 자체를 교체
+[*] 6단계: chdir("/")
+[*] 7단계: umount2("/.old_root", MNT_DETACH)
+[*] 8단계: rmdir("/.old_root")
+[*] 9단계: /proc는 4.5단계에서 이미 마운트됨 (생략)
+
+[+] 컨테이너 진입 완료. execvp로 넘어갑니다.
+
+HOSTNAME=mycontainer
+SHELL_PID=1
+uid=0 gid=0 groups=65534
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+CapEff:	000001ffffffffff
+PROC_SELF=5
+NPID=4
+CGROUP=0::/mc-verify-before-tty
+NETDEVS=lo 
+overlay / overlay rw,relatime,lowerdir=/home/dev/practice/mycontainer/busybox_rootfs,upperdir=/var/lib/mycontainer/containers/mc-verify-before-tty/upper,workdir=/var/lib/mycontainer/containers/mc-verify-before-tty/work,redirect_dir=nofollow,uuid=on,userxattr 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+ls: /.old_root: No such file or directory
+EXIT=0
+STATE_LEFT=none

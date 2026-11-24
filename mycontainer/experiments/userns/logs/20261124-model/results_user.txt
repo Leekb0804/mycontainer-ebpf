@@ -1,0 +1,13 @@
+RESULT label=user-map stage=0-parent    by=parent CapEff=0000000000000000 Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" 
+RESULT label=user-map stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unprivileged_userns (enforce)" (read from /proc/<pid>/status while child blocked)
+RESULT label=user-map stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unprivileged_userns (enforce)" make-private=FAIL(errno=13 EACCES) tmpfs=FAIL(errno=13 EACCES) overlay=FAIL(errno=13 EACCES)
+RESULT label=user-map stage=2-postmap   by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unprivileged_userns (enforce)" make-private=FAIL(errno=13 EACCES) tmpfs=FAIL(errno=13 EACCES) overlay=FAIL(errno=13 EACCES)
+execv: Permission denied
+  parent: write /proc/2669210/uid_map        '0 1000 1' -> OK
+  parent: write /proc/2669210/setgroups      'deny' -> OK
+  parent: write /proc/2669210/gid_map        '0 1000 1' -> OK
+RESULT label=user-nomap stage=0-parent    by=parent CapEff=0000000000000000 Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" 
+RESULT label=user-nomap stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unprivileged_userns (enforce)" (read from /proc/<pid>/status while child blocked)
+RESULT label=user-nomap stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unprivileged_userns (enforce)" make-private=FAIL(errno=13 EACCES) tmpfs=FAIL(errno=13 EACCES) overlay=FAIL(errno=13 EACCES)
+RESULT label=user-nomap stage=2-nomap     by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unprivileged_userns (enforce)" make-private=FAIL(errno=13 EACCES) tmpfs=FAIL(errno=13 EACCES) overlay=FAIL(errno=13 EACCES)
+execv: Permission denied

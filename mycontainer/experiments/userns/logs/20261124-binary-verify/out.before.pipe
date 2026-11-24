@@ -1,0 +1,19 @@
+HOSTNAME=mycontainer
+SHELL_PID=1
+uid=0 gid=0 groups=65534
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+CapEff:	000001ffffffffff
+PROC_SELF=5
+NPID=4
+CGROUP=0::/mc-verify-before-pipe
+NETDEVS=lo 
+overlay / overlay rw,relatime,lowerdir=/home/dev/practice/mycontainer/busybox_rootfs,upperdir=/var/lib/mycontainer/containers/mc-verify-before-pipe/upper,workdir=/var/lib/mycontainer/containers/mc-verify-before-pipe/work,redirect_dir=nofollow,uuid=on,userxattr 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+ls: /.old_root: No such file or directory
+[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출
+[*] uid_map: namespace 0 -> host 1000
+[*] gid_map: namespace 0 -> host 1000
+[*] state 파일 기록 완료: /var/lib/mycontainer/containers/mc-verify-before-pipe/state (PID=2671217, STARTTIME=358165814)
+EXIT=0
+STATE_LEFT=none

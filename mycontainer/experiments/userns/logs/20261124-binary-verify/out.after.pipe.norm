@@ -1,0 +1,19 @@
+[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출
+HOSTNAME=mycontainer
+SHELL_PID=N
+uid=0 gid=0 groups=65534
+Uid:	0	0	0	0
+Gid:	0	0	0	0
+CapEff:	000001ffffffffff
+PROC_SELF=N
+NPID=N
+CGROUP=0::/mc-verify-X
+NETDEVS=lo 
+overlay / overlay rw,relatime,lowerdir=/home/dev/practice/mycontainer/busybox_rootfs,upperdir=/var/lib/mycontainer/containers/mc-verify-X/upper,workdir=/var/lib/mycontainer/containers/mc-verify-X/work,redirect_dir=nofollow,uuid=on,userxattr 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+ls: /.old_root: No such file or directory
+[*] uid_map: namespace 0 -> host 1000
+[*] gid_map: namespace 0 -> host 1000
+[*] state 파일 기록 완료: /var/lib/mycontainer/containers/mc-verify-X/state (PID=N, STARTTIME=N)
+EXIT=0
+STATE_LEFT=none

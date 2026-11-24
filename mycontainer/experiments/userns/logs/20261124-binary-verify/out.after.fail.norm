@@ -1,0 +1,14 @@
+[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출
+[!] overlay 마운트 실패: No such file or directory (ENOENT)
+[*] 0단계: 매핑 완료 신호 대기 중...
+[*] 매핑 완료 확인.
+[*] setgid(0)/setuid(0) 호출 (namespace 관점의 root) - gid_map/uid_map: namespace 0 -> host uid=1000 gid=1000
+[*] setuid(0)/setgid(0) 완료.
+[*] phase2 진입: getuid=0 geteuid=0
+[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private
+[*] 2단계: overlay 마운트 -o lowerdir=/nonexistent-lower,upperdir=/var/lib/mycontainer/containers/mc-verify-X/upper,workdir=/var/lib/mycontainer/containers/mc-verify-X/work
+[*] uid_map: namespace 0 -> host 1000
+[*] gid_map: namespace 0 -> host 1000
+[*] state 파일 기록 완료: /var/lib/mycontainer/containers/mc-verify-X/state (PID=N, STARTTIME=N)
+EXIT=1
+STATE_LEFT=none

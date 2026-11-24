@@ -18,7 +18,7 @@
 | rootfs | busybox 1.37.0 (`busybox_rootfs`, overlay lowerdir로 사용) |
 | 네트워크 | netns + veth + `br0`(10.0.0.1/24) + NAT |
 
-`apparmor_restrict_unprivileged_userns = 1`이라서 **일반 사용자로는 user ns를 만들 수 없다** (`unshare -U`가 `uid_map` 쓰기에서 EPERM). user ns를 쓰는 실험은 sudo로 해야 한다.
+`apparmor_restrict_unprivileged_userns = 1`이라서 **일반 사용자로는 user ns를 제대로 쓸 수 없다.** `unshare -U`는 `uid_map` 쓰기에서 EPERM이었다. clone(CLONE_NEWUSER) 후 바깥 부모가 매핑을 쓰는 방식은 user ns 생성과 매핑 쓰기까지는 성공한다. 하지만 자식이 AppArmor `unprivileged_userns` 프로파일에 묶여 mount와 execve는 EACCES, sethostname은 EPERM으로 막힌다(§2-7). user ns를 쓰는 실험은 sudo로 해야 한다.
 
 ---
 
@@ -113,7 +113,7 @@ systemd                     PID 1
 - PID 번호는 namespace마다 따로 매겨진다. 부모-자식 관계는 커널이 namespace와 상관없이 하나로 관리한다.
 - 컨테이너 init의 진짜 부모는 `mycontainer_run`이다. 컨테이너 안에서 `getppid()`가 0인 건 부모가 바깥 ns에 있어서 안 보이기 때문이다.
 - 그래서 **부모-자식 관계와 고아 여부는 호스트 시점으로 봐야 한다.** 컨테이너 안에서는 "최상위"처럼 보여도 호스트에서는 고아가 될 수 있다.
-- `clone()` 한 번에 프로세스 하나가 생기고, 그게 새 PID ns의 PID 1이다. `/proc/self/exe` 재실행이나 execvp는 같은 프로세스가 프로그램만 바꾸는 것이다.
+- `clone()` 한 번에 프로세스 하나가 생기고, 그게 새 PID ns의 PID 1이다. execvp(그리고 2026-11-24에 없앤 `/proc/self/exe` 재실행, §2-7)는 같은 프로세스가 프로그램만 바꾸는 것이다.
 
 **고아 입양 규칙** (커널 reparenting)
 1. 죽은 부모의 조상 중에 subreaper(`PR_SET_CHILD_SUBREAPER`)가 있으면 그 프로세스에게 입양된다.
@@ -158,6 +158,69 @@ sudo ./mycontainer_ps                     # 고아 컨테이너가 running으로
 - 결과적으로 exec로 들어간 프로세스가 컨테이너 init보다 **권한이 크다.**
 - Docker ⬜: `docker exec`는 원래 프로세스와 같은 조건(같은 user ns, capability, seccomp)으로 들어간다.
 - 수정 여부: **미정**. 지금은 비교 기록으로만 남겨둔다. 고친다면 `setns(CLONE_NEWUSER)` 후 `setgid(0)`/`setuid(0)` 처리가 필요하다.
+
+### 2-7. user namespace에서 capability는 언제 사라지나 (실험) ✅ (2026-11-24)
+
+> **한 줄 요약**: clone 직후 CapEff는 full이고, 문제는 capability가 아니라 uid 미매핑이었다. 재실행은 불필요했다.
+
+**배경**: `run_phase2` 위 주석은 "clone 직후에는 execve를 거치지 않아 CapEff가 0이고, 그래서 overlay 마운트가 Permission denied로 실패한다. `/proc/self/exe`로 재실행해 capability를 다시 받는다"고 설명했다. 이 설명을 실험으로 검증했더니 틀렸다. 그래서 주석을 고치고 재실행(`--phase2` 분기 포함)을 없앴다 (2026-11-24, `280ec28`).
+
+**실험 구성**
+- 소스와 스크립트: `experiments/userns/`. 로그: `experiments/userns/logs/20261124-model/`(exp/flow), `logs/20261124-binary-verify/`(실제 바이너리 전후 비교, `verify.sh`와 `out.*`). 원래 `/tmp/userns-exp/`에서 실행했고 2026-11-24에 옮겼다. `run_sudo*.sh`는 실행 당시 그대로라 `cd /tmp/userns-exp`가 남아 있다(바이너리 `exp`/`flow`는 옮기지 않음).
+  - `exp.c`: 단계별 상태 측정. `results_user.txt`, `results_sudo.txt`, `results_sudo2.txt` (a)
+  - `flow.c`: mycontainer 순서를 재현. `results_user2.txt`, `results_sudo2.txt` (b)
+- 각 단계(매핑 전 → 매핑 후 → setid 후 → execve 후)에서 `/proc/self/status`의 Uid와 CapEff를 찍고, make-private, tmpfs, overlay 마운트를 시도한다.
+- 공통 조건: clone 플래그는 `mycontainer_run.c`와 같은 `NEWUSER|NEWNS|NEWPID|NEWUTS`. 매핑은 `0 1000 1`(uid/gid 둘 다). 예외로 `results_sudo.txt`의 `root-mapU`는 gid_map이 `0 0 1`이었다.
+- restrict=0 실험(`userAA0-*`)은 `run_sudo.sh --toggle-aa`와 `run_sudo2.sh`가 sysctl을 잠깐 0으로 바꾼 동안 돌렸다. 끝나면 원래 값으로 되돌린다(`results_sudo2.txt` 끝 `restrict restored -> 1`). sudo 실행은 restrict=1 상태였다. 표에서는 호스트 root라 해당 없음(–)으로 적었다.
+
+**확인된 것** ✅
+- **clone 직후, 매핑 전에도 자식의 CapEff는 `000001ffffffffff`(full)이다.** 실험한 모든 경우에 그랬다.
+  - 근거: `exp`의 `stage=1-premap by=child` 줄이 호출자, 매핑, restrict와 상관없이 전부 full이다. 이때 uid는 아직 65534다.
+  - user_namespaces(7) "Capabilities": *"The child process created by clone(2) with the CLONE_NEWUSER flag starts out with a complete set of capabilities in the new user namespace."*
+- **실험에서 CapEff가 0이 된 경우는 매핑되지 않은 uid(65534)로 execve했을 때뿐이다.**
+  - 근거: `root-mapU`, `root-nomap`, `userAA0-nomap`의 `stage=3-postexec`가 `CapEff=0000000000000000`이고 uid는 65534였다. `flow`의 `root-s0-r1`은 `phase2-entry`에서 CapEff가 0이었다. 반대로 매핑된 uid 0으로 execve한 경우(`root-map0`, `userAA0-map`, `rootA-setid`)는 full이 유지됐다.
+  - user_namespaces(7): execve 때 capability는 원래 규칙대로 다시 계산되며, *"unless the process has a user ID of 0 within the namespace, or the executable file has a nonempty inheritable capabilities mask, the process will lose all capabilities."*
+- **sudo + uid_map `0 1000 1`에서는 자식의 real uid가 호스트 0인데 매핑에 없다. 그래서 ns 안 uid가 65534로 보이고 overlay가 EACCES다.** setgid(0)/setuid(0)로 uid를 매핑된 값(ns 안 0)으로 바꾸면 CapEff는 full로 유지되고 overlay가 OK다. 커밋 `ef75a3e`의 주장이 맞았다.
+  - 근거: `results_sudo2.txt` (a) `rootA-setid`. `2-postmap`에서는 `getuid=65534 overlay=FAIL(errno=13 EACCES)`였고, `2b-postsetid`에서 `getuid=0 CapEff=000001ffffffffff overlay=OK`가 됐다.
+- **일반 유저 경로(restrict=0)에서는 매핑 직후 이미 uid가 0이다. 그래서 setid는 필요 없지만 해롭지도 않다.**
+  - 근거: `userAA0-s0-*`, `userAA0-s1-*`가 `postmap`에서 모두 `getuid=0`이고 전 단계 OK다.
+- **재실행 유무에 따라 성공과 실패가 갈린 시나리오는 없었다.** sudo에서 setid 없이 재실행하면 오히려 CapEff가 0이 되어 EPERM이 난다.
+  - 근거: 아래 표에서 같은 호출자·restrict·setid 조합끼리 비교하면 재실행 O/X의 성공 여부가 같다. `root-s0-r0`은 overlay EACCES였고, `root-s0-r1`은 CapEff 0으로 sethostname부터 EPERM이었다.
+- **실제 mycontainer 바이너리를 sudo로 돌린 결과가 재실행 제거 전과 후에 같았다.**
+  - 실행 조건: join_cgroup, set_netns, busybox rootfs, 마지막 execvp까지 포함. tty와 파이프 출력 두 방식.
+  - 같았던 항목: hostname `mycontainer`, 셸 PID 1, `/proc` PID 4개, uid 0 / CapEff full, cgroup `0::/mc-verify-X`, netns `lo`만 보임, 루트 overlay와 새 proc 마운트, `/.old_root` 없음, 종료 코드 0, state 파일 정리.
+  - 출력에서 달라진 것은 줄 순서와 문구뿐이다. 재실행을 없애면 자식이 부모 stdio 버퍼 사본을 그대로 물려받으므로 clone 전에 `fflush(stdout)`를 추가했다. 그래서 파이프 출력에서 clone 줄이 맨 앞으로 왔다. 실패 경로에서는 예전에 execve로 버려지던 자식의 출력이 보이게 됐다.
+
+**에러 코드 해석 (주의점)**
+- **EACCES**: uid가 매핑되지 않았을 때, 그리고 AppArmor 제한(`kernel.apparmor_restrict_unprivileged_userns=1`)이 걸렸을 때 나왔다.
+  - 미매핑 근거: overlay가 `getuid=65534`일 때만 EACCES였다.
+  - AppArmor 근거: restrict=1 일반 유저(`flow`의 `user1-*`)는 uid 0, CapEff full인데도 make-private와 overlay가 EACCES였고, 재실행 execv도 EACCES였다. 같은 조건의 `exp`(`results_user.txt`)에서 자식의 AppArmor 라벨은 `unprivileged_userns (enforce)`였다. restrict=0(`userAA0-*`, 라벨 `unconfined`)이면 같은 단계가 OK였다.
+- **EPERM**: mount 계열에서는 CapEff가 0일 때 나왔다(`stage=3-postexec`, `root-s0-r1`). 하지만 **"EPERM이면 capability 부족"이라고 단정할 수는 없다.** restrict=1인 일반 유저에서는 CapEff가 full인데도 sethostname이 EPERM이었다(`user1-s0-r0`, `user1-s1-r0`).
+- 그래서 `mycontainer_run.c`의 mount 실패 메시지는 errno 이름만 찍는다. EACCES면 uid 매핑과 AppArmor 제한을 확인하라는 힌트만 붙이고, 원인을 단정하지 않는다.
+
+**시나리오 표** (`flow`, uid_map/gid_map `0 1000 1`)
+
+| 호출자 | restrict | setid | 재실행 | phase2 진입 시 uid / CapEff | overlay | 이후 단계 (pivot_root, procfs, pid) | 로그 label |
+|---|---|---|---|---|---|---|---|
+| 일반 | 1 | X / O | X | 0 / full | ❌ EACCES (sethostname EPERM, make-private EACCES가 먼저) | SKIP | `user1-s0-r0`, `user1-s1-r0` |
+| 일반 | 1 | X / O | O | — (재실행 execv EACCES) | — | — | `user1-s0-r1`, `user1-s1-r1` |
+| 일반 | 0 | X / O | X / O | 0 / full | ✅ | 전부 OK, 새 procfs(pivot 전/후) self=1, PID 1개, pid 1 | `userAA0-s{0,1}-r{0,1}` |
+| sudo | – | X | X | **65534** / full | ❌ EACCES | SKIP | `root-s0-r0` |
+| sudo | – | X | O | **65534 / 0** | ❌ EPERM (sethostname부터 EPERM) | SKIP (pid 1) | `root-s0-r1` |
+| sudo | – | O | X | 0 / full | ✅ | 전부 OK, 새 procfs self=1, PID 1개, pid 1 | `root-s1-r0` |
+| sudo | – | O | O | 0 / full | ✅ | 전부 OK, 새 procfs self=1, PID 1개, pid 1 | `root-s1-r1` |
+
+- 같은 실행에서 호스트 `/proc`를 bind하면 PID가 155개(sudo)와 157개(일반) 보였다. 새 procfs는 1개였다.
+- `flow`는 overlay가 실패하면 그 뒤 단계를 SKIP한다. `root-s0-r0`의 PID 줄은 실험 코드 버그(fflush 없이 반환)로 출력되지 않았다. 결론에는 영향이 없다.
+
+**미검증 / 한계** ⬜
+- 일반 유저 경로는 이 시스템에서 `apparmor_restrict_unprivileged_userns=1`이라 막혀 있어서 실제 바이너리로는 확인하지 못했다. 모델 실험(`flow`)에서는 restrict=0일 때만 확인했다.
+- EACCES 힌트(uid 매핑/AppArmor 확인 문구)는 sudo 경로에서 재현할 방법이 없어서, 실제로 찍히는 것은 확인하지 못했다. errno 이름 출력은 ENOENT(없는 lowerdir)로만 확인했다.
+- 매핑되지 않은 uid에서 overlay가 EACCES인 정확한 커널 내부 이유는 코드로 추적하지 않았다. "upper/work 디렉터리 권한 검사를 통과하지 못해서"로 보이는 것은 🔶 추정이다.
+
+**부수적으로 알게 된 것**
+- 이 저장소는 커밋 `8746062`에서 이미 호스트 `/proc` bind 우회를 없애고, pivot_root 전에 새 procfs를 마운트하는 방식으로 바뀌었다(§3, 컨테이너 안 PID 180개 → 3개로 검증). 이번 실제 바이너리 실행에서도 PID 격리가 확인됐다(셸 PID 1, `/proc` PID 4개).
+- `ai-agent-runtime-sandbox-security`의 `src/mycontainer_run.c` 사본에는 다음이 남아 있다. 틀린 CapEff 주석(177-183행), `/proc/self/exe` 재실행(385-407행), `--phase2` 분기(413-427행), 호스트 `/proc` bind 우회(4.5단계, 234-259행), 4.7단계 `/dev/null` bind(262-283행 부근).
 
 ---
 
@@ -344,5 +407,7 @@ Docker 쪽 PID는 `docker inspect -f '{{.State.Pid}}' <id>`, 내 컨테이너는
 - [x] §3 수정 F(pivot_root 전에 새 procfs 마운트)를 `mycontainer_run.c`에 적용 (2026-11-13, 컴파일 확인)
 - [x] §3 수정 후 실제 컨테이너로 검증 (2026-11-13, PID 3개, dmesg 새 경고 없음)
 - [x] §3 `fs/namespace.c`의 `mnt_already_visible` 원문과 대조 (2026-11-13, upstream v7.0)
+- [x] §2-7 user ns capability 실험 + 재실행 제거 후 실제 바이너리(sudo) 전후 비교 (2026-11-24)
+- [x] §2-7 실험 로그를 `/tmp/userns-exp/`에서 `experiments/userns/`로 옮기기 (2026-11-24)
 - [ ] Docker 대조 실험: §2-2 ping, §2-3 stop/`--init`, §6 공통 측정
 - [ ] Docker 컨테이너에 eBPF 관측기 붙여보기

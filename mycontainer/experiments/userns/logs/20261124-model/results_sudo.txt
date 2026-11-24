@@ -1,0 +1,39 @@
+### root map 0 (uid_map '0 0 1')
+RESULT label=root-map0 stage=0-parent    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" 
+RESULT label=root-map0 stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=root-map0 stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=root-map0 stage=2-postmap   by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+RESULT label=root-map0 stage=3-postexec  by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+  parent: write /proc/2669315/uid_map        '0 0 1' -> OK
+  parent: write /proc/2669315/setgroups      'deny' -> OK
+  parent: write /proc/2669315/gid_map        '0 0 1' -> OK
+### root map SUDO_UID (uid_map '0 1000 1')
+RESULT label=root-mapU stage=0-parent    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" 
+RESULT label=root-mapU stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=root-mapU stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=root-mapU stage=2-postmap   by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=root-mapU stage=3-postexec  by=child  CapEff=0000000000000000 Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=FAIL(errno=1 EPERM) tmpfs=FAIL(errno=1 EPERM) overlay=FAIL(errno=1 EPERM)
+  parent: write /proc/2669317/uid_map        '0 1000 1' -> OK
+  parent: write /proc/2669317/setgroups      'deny' -> OK
+  parent: write /proc/2669317/gid_map        '0 0 1' -> OK
+### root nomap
+RESULT label=root-nomap stage=0-parent    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" 
+RESULT label=root-nomap stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=root-nomap stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=root-nomap stage=2-nomap     by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=root-nomap stage=3-postexec  by=child  CapEff=0000000000000000 Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=FAIL(errno=1 EPERM) tmpfs=FAIL(errno=1 EPERM) overlay=FAIL(errno=1 EPERM)
+### user map (aa restrict=0)
+RESULT label=userAA0-map stage=0-parent    by=parent CapEff=0000000000000000 Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" 
+RESULT label=userAA0-map stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=userAA0-map stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=userAA0-map stage=2-postmap   by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+RESULT label=userAA0-map stage=3-postexec  by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+  parent: write /proc/2669326/uid_map        '0 1000 1' -> OK
+  parent: write /proc/2669326/setgroups      'deny' -> OK
+  parent: write /proc/2669326/gid_map        '0 1000 1' -> OK
+### user nomap (aa restrict=0)
+RESULT label=userAA0-nomap stage=0-parent    by=parent CapEff=0000000000000000 Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" 
+RESULT label=userAA0-nomap stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=1000,1000,1000,1000 getuid=1000 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=userAA0-nomap stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=userAA0-nomap stage=2-nomap     by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=userAA0-nomap stage=3-postexec  by=child  CapEff=0000000000000000 Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=FAIL(errno=1 EPERM) tmpfs=FAIL(errno=1 EPERM) overlay=FAIL(errno=1 EPERM)

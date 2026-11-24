@@ -1,0 +1,192 @@
+##### (a) exp: sudo, map '0 1000 1'/'0 1000 1', setid
+RESULT label=rootA-setid stage=0-parent    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" 
+RESULT label=rootA-setid stage=1-premap    by=parent CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" (read from /proc/<pid>/status while child blocked)
+RESULT label=rootA-setid stage=1-premap    by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+RESULT label=rootA-setid stage=2-postmap   by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=65534,65534,65534,65534 getuid=65534 aa="unconfined" make-private=OK tmpfs=OK overlay=FAIL(errno=13 EACCES)
+  child: setgid(0) -> OK, setuid(0) -> OK
+RESULT label=rootA-setid stage=2b-postsetid by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+RESULT label=rootA-setid stage=3-postexec  by=child  CapEff=000001ffffffffff Uid(r,e,s,fs)=0,0,0,0 getuid=0 aa="unconfined" make-private=OK tmpfs=OK overlay=OK
+  parent: write /proc/2670107/uid_map        '0 1000 1' -> OK
+  parent: write /proc/2670107/setgroups      'deny' -> OK
+  parent: write /proc/2670107/gid_map        '0 1000 1' -> OK
+
+##### (b) flow: sudo
+### label=root-s0-r0 caller_uid=0 map='0 1000 1'/'0 1000 1' setid=0 reexec=0 restrict=1
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=root-s0-r0 at=postmap        getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=000001ffffffffff
+STATE label=root-s0-r0 at=phase2-entry   getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=000001ffffffffff
+STEP  label=root-s0-r0 step=sethostname          OK
+STEP  label=root-s0-r0 step=make-private         OK
+STEP  label=root-s0-r0 step=overlay              FAIL errno=13 EACCES
+STEP  label=root-s0-r0 step=self-bind            SKIP
+STEP  label=root-s0-r0 step=mkdir-put_old        SKIP
+STEP  label=root-s0-r0 step=proc-new-prepivot    SKIP
+STEP  label=root-s0-r0 step=proc-bind-prepivot   SKIP
+STEP  label=root-s0-r0 step=pivot_root           SKIP
+STEP  label=root-s0-r0 step=chdir                SKIP
+STEP  label=root-s0-r0 step=umount-oldroot       SKIP
+STEP  label=root-s0-r0 step=proc-new-postpivot   SKIP
+  child exit=0
+
+### label=root-s0-r1 caller_uid=0 map='0 1000 1'/'0 1000 1' setid=0 reexec=1 restrict=1
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=root-s0-r1 at=postmap        getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=000001ffffffffff
+  (re-exec'd into --phase2)
+STATE label=root-s0-r1 at=phase2-entry   getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=0000000000000000
+STEP  label=root-s0-r1 step=sethostname          FAIL errno=1 EPERM
+STEP  label=root-s0-r1 step=make-private         FAIL errno=1 EPERM
+STEP  label=root-s0-r1 step=overlay              FAIL errno=1 EPERM
+STEP  label=root-s0-r1 step=self-bind            SKIP
+STEP  label=root-s0-r1 step=mkdir-put_old        SKIP
+STEP  label=root-s0-r1 step=proc-new-prepivot    SKIP
+STEP  label=root-s0-r1 step=proc-bind-prepivot   SKIP
+STEP  label=root-s0-r1 step=pivot_root           SKIP
+STEP  label=root-s0-r1 step=chdir                SKIP
+STEP  label=root-s0-r1 step=umount-oldroot       SKIP
+STEP  label=root-s0-r1 step=proc-new-postpivot   SKIP
+PID   label=root-s0-r1 getpid=1 (no rootfs; /proc checks skipped)
+  child exit=0
+
+### label=root-s1-r0 caller_uid=0 map='0 1000 1'/'0 1000 1' setid=1 reexec=0 restrict=1
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=root-s1-r0 at=postmap        getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=000001ffffffffff
+STEP  label=root-s1-r0 step=setgid(0)            OK
+STEP  label=root-s1-r0 step=setuid(0)            OK
+STATE label=root-s1-r0 at=postsetid      getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STATE label=root-s1-r0 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=root-s1-r0 step=sethostname          OK
+STEP  label=root-s1-r0 step=make-private         OK
+STEP  label=root-s1-r0 step=overlay              OK
+STEP  label=root-s1-r0 step=self-bind            OK
+STEP  label=root-s1-r0 step=mkdir-put_old        OK
+STEP  label=root-s1-r0 step=proc-new-prepivot    OK
+STEP  label=root-s1-r0 step=proc-bind-prepivot   OK
+STEP  label=root-s1-r0 step=pivot_root           OK
+STEP  label=root-s1-r0 step=chdir                OK
+STEP  label=root-s1-r0 step=umount-oldroot       OK
+STEP  label=root-s1-r0 step=proc-new-postpivot   OK
+PID   label=root-s1-r0 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670119 npids=155 | new-postpivot: self=1 npids=1
+  child exit=0
+
+### label=root-s1-r1 caller_uid=0 map='0 1000 1'/'0 1000 1' setid=1 reexec=1 restrict=1
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=root-s1-r1 at=postmap        getuid=65534 getgid=65534 Uid=65534,65534,65534,65534 CapEff=000001ffffffffff
+STEP  label=root-s1-r1 step=setgid(0)            OK
+STEP  label=root-s1-r1 step=setuid(0)            OK
+STATE label=root-s1-r1 at=postsetid      getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+  (re-exec'd into --phase2)
+STATE label=root-s1-r1 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=root-s1-r1 step=sethostname          OK
+STEP  label=root-s1-r1 step=make-private         OK
+STEP  label=root-s1-r1 step=overlay              OK
+STEP  label=root-s1-r1 step=self-bind            OK
+STEP  label=root-s1-r1 step=mkdir-put_old        OK
+STEP  label=root-s1-r1 step=proc-new-prepivot    OK
+STEP  label=root-s1-r1 step=proc-bind-prepivot   OK
+STEP  label=root-s1-r1 step=pivot_root           OK
+STEP  label=root-s1-r1 step=chdir                OK
+STEP  label=root-s1-r1 step=umount-oldroot       OK
+STEP  label=root-s1-r1 step=proc-new-postpivot   OK
+PID   label=root-s1-r1 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670123 npids=155 | new-postpivot: self=1 npids=1
+  child exit=0
+
+##### restrict before = 1
+##### (b) flow: unprivileged user, restrict=0
+### label=userAA0-s0-r0 caller_uid=1000 map='0 1000 1'/'0 1000 1' setid=0 reexec=0 restrict=0
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=userAA0-s0-r0 at=postmap        getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STATE label=userAA0-s0-r0 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s0-r0 step=sethostname          OK
+STEP  label=userAA0-s0-r0 step=make-private         OK
+STEP  label=userAA0-s0-r0 step=overlay              OK
+STEP  label=userAA0-s0-r0 step=self-bind            OK
+STEP  label=userAA0-s0-r0 step=mkdir-put_old        OK
+STEP  label=userAA0-s0-r0 step=proc-new-prepivot    OK
+STEP  label=userAA0-s0-r0 step=proc-bind-prepivot   OK
+STEP  label=userAA0-s0-r0 step=pivot_root           OK
+STEP  label=userAA0-s0-r0 step=chdir                OK
+STEP  label=userAA0-s0-r0 step=umount-oldroot       OK
+STEP  label=userAA0-s0-r0 step=proc-new-postpivot   OK
+PID   label=userAA0-s0-r0 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670133 npids=157 | new-postpivot: self=1 npids=1
+  child exit=0
+
+### label=userAA0-s0-r1 caller_uid=1000 map='0 1000 1'/'0 1000 1' setid=0 reexec=1 restrict=0
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=userAA0-s0-r1 at=postmap        getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+  (re-exec'd into --phase2)
+STATE label=userAA0-s0-r1 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s0-r1 step=sethostname          OK
+STEP  label=userAA0-s0-r1 step=make-private         OK
+STEP  label=userAA0-s0-r1 step=overlay              OK
+STEP  label=userAA0-s0-r1 step=self-bind            OK
+STEP  label=userAA0-s0-r1 step=mkdir-put_old        OK
+STEP  label=userAA0-s0-r1 step=proc-new-prepivot    OK
+STEP  label=userAA0-s0-r1 step=proc-bind-prepivot   OK
+STEP  label=userAA0-s0-r1 step=pivot_root           OK
+STEP  label=userAA0-s0-r1 step=chdir                OK
+STEP  label=userAA0-s0-r1 step=umount-oldroot       OK
+STEP  label=userAA0-s0-r1 step=proc-new-postpivot   OK
+PID   label=userAA0-s0-r1 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670140 npids=157 | new-postpivot: self=1 npids=1
+  child exit=0
+
+### label=userAA0-s1-r0 caller_uid=1000 map='0 1000 1'/'0 1000 1' setid=1 reexec=0 restrict=0
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=userAA0-s1-r0 at=postmap        getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s1-r0 step=setgid(0)            OK
+STEP  label=userAA0-s1-r0 step=setuid(0)            OK
+STATE label=userAA0-s1-r0 at=postsetid      getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STATE label=userAA0-s1-r0 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s1-r0 step=sethostname          OK
+STEP  label=userAA0-s1-r0 step=make-private         OK
+STEP  label=userAA0-s1-r0 step=overlay              OK
+STEP  label=userAA0-s1-r0 step=self-bind            OK
+STEP  label=userAA0-s1-r0 step=mkdir-put_old        OK
+STEP  label=userAA0-s1-r0 step=proc-new-prepivot    OK
+STEP  label=userAA0-s1-r0 step=proc-bind-prepivot   OK
+STEP  label=userAA0-s1-r0 step=pivot_root           OK
+STEP  label=userAA0-s1-r0 step=chdir                OK
+STEP  label=userAA0-s1-r0 step=umount-oldroot       OK
+STEP  label=userAA0-s1-r0 step=proc-new-postpivot   OK
+PID   label=userAA0-s1-r0 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670147 npids=157 | new-postpivot: self=1 npids=1
+  child exit=0
+
+### label=userAA0-s1-r1 caller_uid=1000 map='0 1000 1'/'0 1000 1' setid=1 reexec=1 restrict=0
+  parent: setgroups  'deny' -> OK
+  parent: uid_map    '0 1000 1' -> OK
+  parent: gid_map    '0 1000 1' -> OK
+STATE label=userAA0-s1-r1 at=postmap        getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s1-r1 step=setgid(0)            OK
+STEP  label=userAA0-s1-r1 step=setuid(0)            OK
+STATE label=userAA0-s1-r1 at=postsetid      getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+  (re-exec'd into --phase2)
+STATE label=userAA0-s1-r1 at=phase2-entry   getuid=0 getgid=0 Uid=0,0,0,0 CapEff=000001ffffffffff
+STEP  label=userAA0-s1-r1 step=sethostname          OK
+STEP  label=userAA0-s1-r1 step=make-private         OK
+STEP  label=userAA0-s1-r1 step=overlay              OK
+STEP  label=userAA0-s1-r1 step=self-bind            OK
+STEP  label=userAA0-s1-r1 step=mkdir-put_old        OK
+STEP  label=userAA0-s1-r1 step=proc-new-prepivot    OK
+STEP  label=userAA0-s1-r1 step=proc-bind-prepivot   OK
+STEP  label=userAA0-s1-r1 step=pivot_root           OK
+STEP  label=userAA0-s1-r1 step=chdir                OK
+STEP  label=userAA0-s1-r1 step=umount-oldroot       OK
+STEP  label=userAA0-s1-r1 step=proc-new-postpivot   OK
+PID   label=userAA0-s1-r1 getpid=1 | new-prepivot: self=1 npids=1 | bind-host: self=2670154 npids=157 | new-postpivot: self=1 npids=1
+  child exit=0
+
+##### restrict after explicit restore = 1
+##### restrict restored -> 1
