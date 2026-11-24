@@ -92,7 +92,7 @@ static void set_netns(const char *netns_name) {
  * 줄과 일치해야 한다.
  *
  * STARTTIME: PID 재사용 판별용 (mycontainer_state.h 참고). execve로
- * 프로그램이 바뀌어도(phase2 재실행, 최종 execvp) starttime은 그대로라서
+ * 프로그램이 바뀌어도(최종 execvp) starttime은 그대로라서
  * clone 직후 한 번만 읽으면 된다.
  */
 static void write_state_file(const char *container_dir, pid_t pid,
@@ -176,20 +176,40 @@ static void deny_setgroups(pid_t child_pid) {
     close(fd);
 }
 
-/* ---------- phase2: execve() 이후에 실행되는 "진짜 컨테이너 진입" 로직 ---------- */
 /*
- * clone() 직후에는 아직 execve()를 한 번도 거치지 않아서, uid_map으로 매핑을
- * 마쳐도 capability(CapEff)가 전부 0인 상태로 남는다 (man capabilities(7):
- * "이 값들의 재계산은 execve() 도중에 일어난다"). CAP_SYS_ADMIN이 필요한
- * overlay 마운트를 이 상태로 시도하면 Permission denied가 난다.
- * 그래서 이 함수는 child_entry가 execve("/proc/self/exe", ...)로 자기
- * 자신을 다시 실행한 뒤에야 호출된다 - 그 시점에는 매핑된 UID(0) 기준으로
- * capability가 재계산되어 있다.
+ * mount 실패용 die(): errno 이름을 같이 찍고, EACCES면 확인할 곳을 알려준다.
+ * (EPERM/EACCES만으로 원인을 단정하지 않는다 - 아래 run_phase2 주석 참고)
+ */
+static void die_mount(const char *msg) {
+    int e = errno;
+    const char *name = strerrorname_np(e);
+    fprintf(stderr, "[!] %s: %s (%s)\n", msg, strerror(e), name ? name : "?");
+    if (e == EACCES) {
+        fprintf(stderr,
+            "    힌트: uid 매핑 상태(getuid()=%d가 매핑 안의 값인지, /proc/self/uid_map)와\n"
+            "          AppArmor 제한(sysctl kernel.apparmor_restrict_unprivileged_userns)을 확인\n",
+            getuid());
+    }
+    exit(1);
+}
+
+/* ---------- phase2: 매핑 + setgid/setuid 이후의 "컨테이너 진입" 로직 ---------- */
+/*
+ * 실험으로 확인한 사실 (uid_map/gid_map "0 <host> 1", 이 파일과 같은 clone 플래그):
+ * - clone 직후 CapEff는 full이다. 실험한 모든 경우에 그랬다.
+ * - sudo + "0 1000 1" 매핑에서는 자식 uid가 매핑 밖(65534)이라 overlay가 EACCES였다.
+ *   child_entry의 setgid(0)/setuid(0)가 uid를 매핑된 값(ns 안 0)으로 바꾸면 통과한다.
+ *   일반 유저 경로에서는 매핑 직후 uid가 이미 0이라 필요 없지만 해롭지 않다.
+ * - 매핑 밖 uid(65534)로 execve하면 CapEff가 0이 된다.
+ * - 예전의 execve("/proc/self/exe") 재실행은 필요 없었다(재실행 유무로 결과가
+ *   갈린 경우 없음). setgid/setuid 없이 재실행하면 위 이유로 오히려 나빠진다.
+ * - EPERM이 곧 capability 부족은 아니다: apparmor_restrict_unprivileged_userns=1인
+ *   일반 유저에서는 CapEff가 full인데도 sethostname이 EPERM이었다.
  */
 static void run_phase2(const char *lowerdir, const char *upperdir,
                         const char *workdir, const char *mergeddir,
                         char **cmd_argv) {
-    /* setuid/setgid + re-exec 이후 실제로 namespace 0(root)로 보이는지 확인 */
+    /* setgid/setuid 이후 실제로 namespace 0(root)로 보이는지 확인 */
     printf("[*] phase2 진입: getuid=%d geteuid=%d\n", getuid(), geteuid());
 
     /* hostname 설정 (UTS namespace 격리 확인용) */
@@ -200,7 +220,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     /* ---------- 1단계: propagation을 private로 전환 ---------- */
     printf("[*] 1단계: mount(MS_PRIVATE|MS_REC) - propagation shared -> private\n");
     if (mount(NULL, "/", NULL, MS_PRIVATE | MS_REC, NULL) != 0) {
-        die("propagation private 설정 실패");
+        die_mount("propagation private 설정 실패");
     }
 
     /* ---------- 2단계: overlay 마운트 ---------- */
@@ -211,7 +231,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
 
     printf("[*] 2단계: overlay 마운트 -o %s\n", overlay_opts);
     if (mount("overlay", mergeddir, "overlay", 0, overlay_opts) != 0) {
-        die("overlay 마운트 실패");
+        die_mount("overlay 마운트 실패");
     }
 
     /* ---------- 3단계: mergeddir을 마운트 포인트로 승격 (self bind mount) ---------- */
@@ -223,7 +243,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
      */
     printf("[*] 3단계: mount(mergeddir, mergeddir, MS_BIND) - 마운트 포인트로 재확인\n");
     if (mount(mergeddir, mergeddir, NULL, MS_BIND | MS_REC, NULL) != 0) {
-        die("self bind mount 실패");
+        die_mount("self bind mount 실패");
     }
 
     /* ---------- 4단계: put_old 디렉토리 준비 ---------- */
@@ -257,7 +277,7 @@ static void run_phase2(const char *lowerdir, const char *upperdir,
     printf("[*] 4.5단계: 새 procfs -> %s 마운트 (pivot_root 전)\n", proc_target);
     if (mount("proc", proc_target, "proc",
               MS_NOSUID | MS_NODEV | MS_NOEXEC, NULL) != 0) {
-        die("procfs 마운트 실패");
+        die_mount("procfs 마운트 실패");
     }
 
     /* ---------- 5단계: pivot_root 실행 ---------- */
@@ -353,54 +373,15 @@ static int child_entry(void *arg) {
            args->map_uid, args->map_gid);
     if (setgid(0) != 0) die("setgid 실패");
     if (setuid(0) != 0) die("setuid 실패");
-    printf("[*] setuid(0)/setgid(0) 완료. 재실행합니다.\n");
+    printf("[*] setuid(0)/setgid(0) 완료.\n");
 
-    /*
-     * ---------- re-exec: capability를 매핑된 UID 기준으로 재계산시킴 ----------
-     * "/proc/self/exe"는 항상 지금 실행 중인 바이너리 자신을 가리키는 심볼릭
-     * 링크다. 이 경로로 스스로를 execve하면, 커널이 execve() 도중 규칙에
-     * 따라 (지금 매핑된 UID가 0이므로) capability를 전부 부여한 채로
-     * 다시 시작된다. 그 두 번째 실행을 "--phase2"로 표시해 main()이
-     * 구분하게 한다.
-     */
-    char *new_argv[7 + 32]; /* lowerdir/upper/work/merged 4개 + cmd 최대 32개 여유 */
-    int i = 0;
-    new_argv[i++] = "/proc/self/exe";
-    new_argv[i++] = "--phase2";
-    new_argv[i++] = (char *)args->lowerdir;
-    new_argv[i++] = (char *)args->upperdir;
-    new_argv[i++] = (char *)args->workdir;
-    new_argv[i++] = (char *)args->mergeddir;
-    for (int j = 0; args->cmd_argv[j] != NULL && i < 7 + 31; j++) {
-        new_argv[i++] = args->cmd_argv[j];
-    }
-    new_argv[i] = NULL;
-
-    extern char **environ;
-    execve("/proc/self/exe", new_argv, environ);
-    die("phase2 재실행(execve) 실패");
-    return 1;
+    /* 재실행(execve) 없이 바로 진행: run_phase2 위 주석 참고 */
+    run_phase2(args->lowerdir, args->upperdir, args->workdir, args->mergeddir,
+               args->cmd_argv);
+    return 1; /* run_phase2는 성공 시 execvp로 넘어가 여기로 안 돌아옴 */
 }
 
 int main(int argc, char *argv[]) {
-    /*
-     * ---------- phase2 분기 ----------
-     * child_entry가 execve("/proc/self/exe", ...)로 재실행할 때 이 분기를
-     * 탄다. 이 시점은 capability가 매핑된 UID(0) 기준으로 재계산된 이후라,
-     * 여기서 바로 overlay 마운트를 포함한 나머지 단계를 진행해도 된다.
-     * clone/pipe/uid_map 설정은 이미 첫 번째 실행에서 다 끝난 뒤이므로
-     * 다시 하지 않는다.
-     */
-    if (argc >= 6 && strcmp(argv[1], "--phase2") == 0) {
-        const char *lowerdir = argv[2];
-        const char *upperdir = argv[3];
-        const char *workdir = argv[4];
-        const char *mergeddir = argv[5];
-        char **cmd_argv = &argv[6];
-        run_phase2(lowerdir, upperdir, workdir, mergeddir, cmd_argv);
-        return 1; /* run_phase2는 성공 시 execvp로 넘어가 여기로 안 돌아옴 */
-    }
-
     if (argc < 6) {
         fprintf(stderr,
             "사용법: %s <lowerdir 콜론연결> <컨테이너 작업디렉토리> <cgroup 경로> "
@@ -466,6 +447,11 @@ int main(int argc, char *argv[]) {
     char *stack_top = stack + STACK_SIZE;
 
     printf("[*] clone(CLONE_NEWUSER|CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWUTS|SIGCHLD) 호출\n");
+    /*
+     * 재실행이 없으므로 자식은 부모의 stdio 버퍼 사본을 그대로 들고 시작한다.
+     * stdout이 파이프/파일이면 자식의 exit()가 그 사본까지 다시 출력하므로 먼저 비운다.
+     */
+    fflush(stdout);
     pid_t child_pid = clone(child_entry, stack_top,
                          CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWPID | CLONE_NEWUTS | SIGCHLD,
                          &cargs);
